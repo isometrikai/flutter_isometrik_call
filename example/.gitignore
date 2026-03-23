@@ -1,0 +1,46 @@
+# Example app local secrets
+.env
+
+# Flutter / Dart generated
+.dart_tool/
+.packages
+.pub/
+.flutter-plugins
+.flutter-plugins-dependencies
+build/
+
+# IDE
+.idea/
+.vscode/
+*.iml
+
+# Logs / OS artifacts
+*.log
+.DS_Store
+
+# Android generated/local
+android/.gradle/
+android/local.properties
+android/**/GeneratedPluginRegistrant.java
+android/**/GeneratedPluginRegistrant.kt
+android/captures/
+
+# iOS generated/local
+ios/Flutter/Generated.xcconfig
+ios/Flutter/flutter_export_environment.sh
+ios/Flutter/ephemeral/
+ios/Pods/
+ios/.symlinks/
+ios/Runner.xcworkspace/
+ios/Runner/GeneratedPluginRegistrant.*
+ios/**/*.xcworkspace/xcuserdata/
+ios/**/*.xcuserdatad/
+ios/**/*.xcuserstate
+
+# Desktop generated registrants
+linux/flutter/generated_plugin_registrant.*
+windows/flutter/generated_plugin_registrant.*
+macos/Flutter/ephemeral/
+macos/Pods/
+macos/.symlinks/
+macos/Runner/GeneratedPluginRegistrant.swift

@@ -117,6 +117,16 @@ class IsometrikFlutterCall {
     return IsometrikFlutterCallPlatform.instance.cancelScheduledHangup();
   }
 
+  Future<Map<String, dynamic>> requestRuntimePermissions({
+    required bool requestMicrophone,
+    required bool requestCamera,
+  }) {
+    return IsometrikFlutterCallPlatform.instance.requestRuntimePermissions(
+      requestMicrophone: requestMicrophone,
+      requestCamera: requestCamera,
+    );
+  }
+
   Stream<IsometrikNativeCallEvent> get events {
     return IsometrikFlutterCallPlatform.instance.events().map(
       IsometrikNativeCallEvent.fromMap,
