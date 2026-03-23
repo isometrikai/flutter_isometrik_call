@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:ui';
 
 import 'package:flutter/foundation.dart';
+import 'package:flutter/services.dart';
 import 'package:livekit_client/livekit_client.dart';
 import 'package:permission_handler/permission_handler.dart';
 
@@ -90,6 +91,7 @@ class IsometrikCallController extends ChangeNotifier {
   String? _permissionsMessage;
   String? get permissionsMessage => _permissionsMessage;
   bool _permissionPreflightTriggered = false;
+  Future<bool>? _permissionRequestInFlight;
 
   /// True when required runtime permissions are missing for the active call mode.
   bool get hasMissingPermissions => _permissionsMessage != null;
@@ -311,12 +313,42 @@ class IsometrikCallController extends ChangeNotifier {
   /// Audio call requires microphone; video call requires both microphone + camera.
   /// Returns `true` only when all required permissions are granted.
   Future<bool> _ensureRequiredPermissions() async {
+    final inFlight = _permissionRequestInFlight;
+    if (inFlight != null) {
+      return inFlight;
+    }
+    final request = _requestRequiredPermissionsInternal();
+    _permissionRequestInFlight = request;
+    try {
+      return await request;
+    } finally {
+      if (identical(_permissionRequestInFlight, request)) {
+        _permissionRequestInFlight = null;
+      }
+    }
+  }
+
+  Future<bool> _requestRequiredPermissionsInternal() async {
     final required = <Permission>[
       Permission.microphone,
       if (hasVideo) Permission.camera,
     ];
 
-    final statuses = await required.request();
+    Map<Permission, PermissionStatus> statuses;
+    try {
+      statuses = await required.request();
+    } on PlatformException catch (e) {
+      // iOS permission_handler rejects concurrent requests with this error.
+      // Wait briefly and read current permission state instead of failing call setup.
+      if (e.code == 'ERROR_ALREADY_REQUESTING_PERMISSIONS') {
+        await Future<void>.delayed(const Duration(milliseconds: 300));
+        statuses = <Permission, PermissionStatus>{
+          for (final permission in required) permission: await permission.status,
+        };
+      } else {
+        rethrow;
+      }
+    }
     final missing = <String>[];
     var needsSettings = false;
 
