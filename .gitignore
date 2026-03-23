@@ -35,7 +35,42 @@ build/
 # Coverage and misc
 coverage/
 .DS_Store
+*.log
+
+# VS Code / IntelliJ
+.vscode/
+.idea/
 
 # Symbolication / obfuscation (Flutter template)
 app.*.symbols
 app.*.map.json
+
+# Android / Gradle
+**/android/.gradle/
+**/android/local.properties
+**/android/**/GeneratedPluginRegistrant.java
+**/android/**/GeneratedPluginRegistrant.kt
+**/android/captures/
+
+# iOS / macOS (Xcode user state)
+**/ios/Flutter/Flutter.framework
+**/ios/Flutter/Flutter.podspec
+**/ios/Flutter/Generated.xcconfig
+**/ios/Flutter/ephemeral/
+**/ios/Pods/
+**/ios/.symlinks/
+**/ios/Runner.xcworkspace/
+**/ios/Runner/GeneratedPluginRegistrant.*
+**/ios/**/*.xcuserstate
+**/ios/**/*.xcworkspace/xcuserdata/
+**/ios/**/*.xcuserdatad/
+**/macos/Flutter/ephemeral/
+**/macos/Pods/
+**/macos/.symlinks/
+**/macos/Runner/GeneratedPluginRegistrant.swift
+**/macos/**/*.xcworkspace/xcuserdata/
+**/macos/**/*.xcuserdatad/
+
+# Linux / Windows generated registrants
+**/linux/flutter/generated_plugin_registrant.*
+**/windows/flutter/generated_plugin_registrant.*

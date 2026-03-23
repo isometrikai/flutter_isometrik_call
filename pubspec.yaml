@@ -4,7 +4,7 @@ version: 0.0.1
 homepage: https://github.com/isometrik/isometrik_flutter_call
 
 environment:
-  sdk: ^3.11.1
+  sdk: ^3.9.0
   flutter: '>=3.3.0'
 
 dependencies:
