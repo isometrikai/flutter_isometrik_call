@@ -131,6 +131,7 @@ class IsometrikCallSdk {
   StreamSubscription<IsometrikRoutedMeetingEvent>? _autoMqttSub;
   StreamSubscription<IsometrikNativeCallEvent>? _autoNativeSub;
   void Function(IsometrikCallController controller)? _onShowCallPage;
+  bool _triggerPermissionsOnIncomingAccept = true;
 
   /// Stored incoming meeting for use when native `callAnswered` fires.
   /// Set by [reportIncomingCallFromMeeting], consumed by auto native handler.
@@ -645,11 +646,16 @@ class IsometrikCallSdk {
   /// (e.g. incoming call accepted via CallKit). The callback receives a
   /// pre-configured [IsometrikCallController] to pass to [IsometrikCallPage].
   ///
+  /// [triggerPermissionsOnIncomingAccept] controls whether SDK preflights
+  /// microphone/camera permissions right after incoming call acceptance.
+  ///
   /// Call after [attachMeetingRouterToMqtt].
   void enableAutoCallHandling({
     required void Function(IsometrikCallController controller) onShowCallPage,
+    bool triggerPermissionsOnIncomingAccept = true,
   }) {
     _onShowCallPage = onShowCallPage;
+    _triggerPermissionsOnIncomingAccept = triggerPermissionsOnIncomingAccept;
 
     _autoMqttSub?.cancel();
     _autoMqttSub = meetingRouter.events.listen(_handleAutoMqttEvent);
@@ -725,6 +731,7 @@ class IsometrikCallSdk {
             rtcToken: data.rtcToken,
             peerImageUrl: pending?.initiatorImageUrl,
             initialStatus: IsometrikCallStatus.connecting,
+            preflightPermissionsOnInit: _triggerPermissionsOnIncomingAccept,
           );
           _onShowCallPage?.call(controller);
         case IsometrikFailure(:final error):
@@ -770,12 +777,16 @@ class IsometrikCallSdk {
   /// final ctrl = await sdk.startCall(memberId: id, memberName: name);
   /// if (ctrl != null) IsometrikCallPage.show(context, controller: ctrl);
   /// ```
+  ///
+  /// [triggerPermissionsOnCallIntent] controls whether SDK preflights
+  /// microphone/camera permissions immediately when controller is created.
   Future<IsometrikCallController?> startCall({
     required String memberId,
     required String memberName,
     String? memberImageUrl,
     IsometrikLiveCallType callType = IsometrikLiveCallType.audioCall,
     String? conversationId,
+    bool triggerPermissionsOnCallIntent = true,
   }) async {
     final r = await createOutgoingCall(
       memberId: memberId,
@@ -799,6 +810,7 @@ class IsometrikCallSdk {
           hasVideo: callType == IsometrikLiveCallType.videoCall,
           rtcToken: data.rtcToken,
           peerImageUrl: memberImageUrl,
+          preflightPermissionsOnInit: triggerPermissionsOnCallIntent,
         );
       case IsometrikFailure(:final error):
         debugPrint('IsometrikCallSdk.startCall failed: $error');

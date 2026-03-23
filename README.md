@@ -82,6 +82,8 @@ final repo = IsometrikMeetingRepository(client);
 
 - Capabilities: **Push Notifications**, **Background Modes** (VoIP, Remote notifications).
 - `Info.plist`: microphone / camera usage strings for video calls.
+- `Podfile` (`post_install`): add `PERMISSION_CAMERA=1` and `PERMISSION_MICROPHONE=1`
+  in `GCC_PREPROCESSOR_DEFINITIONS` for `permission_handler`.
 
 ## LiveKit
 

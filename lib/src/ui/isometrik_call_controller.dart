@@ -1,6 +1,9 @@
 import 'dart:async';
+import 'dart:ui';
 
 import 'package:flutter/foundation.dart';
+import 'package:livekit_client/livekit_client.dart';
+import 'package:permission_handler/permission_handler.dart';
 
 import '../api/isometrik_api_error.dart';
 import '../livekit_session_manager.dart';
@@ -52,8 +55,10 @@ class IsometrikCallController extends ChangeNotifier {
     this.hasVideo = false,
     this.rtcToken,
     this.peerImageUrl,
+    this.preflightPermissionsOnInit = false,
     IsometrikCallStatus initialStatus = IsometrikCallStatus.calling,
   }) : _status = initialStatus {
+    _localVideoEnabled = hasVideo;
     _attach();
   }
 
@@ -62,12 +67,32 @@ class IsometrikCallController extends ChangeNotifier {
   final String peerName;
   final String? peerImageUrl;
   final bool isOutgoing;
+  final bool preflightPermissionsOnInit;
 
   /// RTC token for LiveKit — set on creation (outgoing) or after accept API (incoming).
   String? rtcToken;
 
   /// Tracks whether video is active; toggled by video upgrade acceptance.
   bool hasVideo;
+
+  /// True when in-call UI is shown as a minimized floating window.
+  ///
+  /// This lets host apps react consistently and avoids duplicating minimize
+  /// state in multiple widgets.
+  bool _isMinimized = false;
+  bool get isMinimized => _isMinimized;
+
+  /// Last on-screen position of minimized window (logical pixels).
+  Offset _minimizedWindowOffset = const Offset(16, 120);
+  Offset get minimizedWindowOffset => _minimizedWindowOffset;
+
+  /// Last permission failure message shown in UI fallback.
+  String? _permissionsMessage;
+  String? get permissionsMessage => _permissionsMessage;
+  bool _permissionPreflightTriggered = false;
+
+  /// True when required runtime permissions are missing for the active call mode.
+  bool get hasMissingPermissions => _permissionsMessage != null;
 
   // ---------------------------------------------------------------------------
   // Status
@@ -115,6 +140,44 @@ class IsometrikCallController extends ChangeNotifier {
   bool get isSpeaker => _speaker;
 
   // ---------------------------------------------------------------------------
+  // Video controls
+  // ---------------------------------------------------------------------------
+
+  /// Whether the local camera stream is currently enabled.
+  ///
+  /// This is intentionally tracked in controller state so UI can react even
+  /// when LiveKit publishes/unpublishes asynchronously.
+  bool _localVideoEnabled = false;
+  bool get isLocalVideoEnabled => _localVideoEnabled;
+
+  /// Current preferred camera side for local publishing.
+  bool _isFrontCamera = true;
+  bool get isFrontCamera => _isFrontCamera;
+
+  /// True when at least one local/remote video track is currently published.
+  ///
+  /// Used by UI to gracefully fall back to an audio-focused layout when all
+  /// participants disable camera streams.
+  bool get hasAnyVideoStreaming {
+    final room = _liveKit.currentRoom;
+    if (room == null) return false;
+
+    bool hasTrack(Participant? participant) {
+      if (participant == null) return false;
+      for (final publication in participant.videoTrackPublications) {
+        if (publication.track != null) return true;
+      }
+      return false;
+    }
+
+    if (hasTrack(room.localParticipant)) return true;
+    for (final participant in room.remoteParticipants.values) {
+      if (hasTrack(participant)) return true;
+    }
+    return false;
+  }
+
+  // ---------------------------------------------------------------------------
   // Video upgrade (mirrors Swift ISMExpandableCallControlsViewDelegate)
   // ---------------------------------------------------------------------------
 
@@ -149,6 +212,12 @@ class IsometrikCallController extends ChangeNotifier {
     _mqttSub = sdk.meetingRouter.events.listen(_onMqttEvent);
     _nativeSub = sdk.native.events.listen(_onNativeEvent);
 
+    // Optional SDK-level preflight so iOS system permission prompts can be
+    // shown as soon as call intent starts (outgoing create / incoming accept).
+    if (preflightPermissionsOnInit) {
+      unawaited(preflightPermissionsIfNeeded());
+    }
+
     // Incoming-accepted: immediately start connecting media.
     if (_status == IsometrikCallStatus.connecting) {
       _connectAndPublish();
@@ -177,6 +246,8 @@ class IsometrikCallController extends ChangeNotifier {
       case IsometrikRoutedVideoUpgradeAccepted():
         _videoUpgradeRequest = null;
         hasVideo = true;
+        _localVideoEnabled = true;
+        unawaited(_syncLocalMediaState());
         notifyListeners();
       default:
         break;
@@ -201,6 +272,9 @@ class IsometrikCallController extends ChangeNotifier {
   Future<void> _connectAndPublish() async {
     if (_status == IsometrikCallStatus.connected) return;
 
+    final granted = await _ensureRequiredPermissions();
+    if (!granted) return;
+
     _connectedAt = DateTime.now();
     _setStatus(IsometrikCallStatus.connected);
 
@@ -219,6 +293,7 @@ class IsometrikCallController extends ChangeNotifier {
     if (token != null && token.isNotEmpty && url != null) {
       try {
         await _liveKit.connect(url: url, token: token);
+        await _syncLocalMediaState();
       } catch (e) {
         debugPrint('IsometrikCallController: LiveKit connect error: $e');
       }
@@ -229,6 +304,84 @@ class IsometrikCallController extends ChangeNotifier {
     } catch (e) {
       debugPrint('IsometrikCallController: startPublishing error: $e');
     }
+  }
+
+  /// Requests and validates permissions needed for the current call mode.
+  ///
+  /// Audio call requires microphone; video call requires both microphone + camera.
+  /// Returns `true` only when all required permissions are granted.
+  Future<bool> _ensureRequiredPermissions() async {
+    final required = <Permission>[
+      Permission.microphone,
+      if (hasVideo) Permission.camera,
+    ];
+
+    final statuses = await required.request();
+    final missing = <String>[];
+    var needsSettings = false;
+
+    for (final entry in statuses.entries) {
+      final permission = entry.key;
+      final status = entry.value;
+      if (status.isGranted) continue;
+
+      if (permission == Permission.microphone) {
+        missing.add('Microphone');
+      } else if (permission == Permission.camera) {
+        missing.add('Camera');
+      } else {
+        missing.add(permission.toString());
+      }
+
+      if (status.isPermanentlyDenied || status.isRestricted) {
+        needsSettings = true;
+      }
+    }
+
+    if (missing.isEmpty) {
+      _permissionsMessage = null;
+      notifyListeners();
+      return true;
+    }
+
+    final missingText = missing.join(' and ');
+    _permissionsMessage = needsSettings
+        ? '$missingText permission is required. Please enable it from Settings.'
+        : '$missingText permission is required to continue this call.';
+    notifyListeners();
+    return false;
+  }
+
+  /// Public permission preflight used by the call page.
+  ///
+  /// This prompts as soon as the in-call UI is shown, instead of waiting for
+  /// later call lifecycle events.
+  Future<bool> ensurePermissionsForCurrentCall() {
+    return preflightPermissionsIfNeeded();
+  }
+
+  /// Triggers one-time permission preflight for this controller lifecycle.
+  ///
+  /// Safe to call from multiple places (SDK, call page, retry buttons).
+  Future<bool> preflightPermissionsIfNeeded() async {
+    if (_permissionPreflightTriggered) {
+      return !hasMissingPermissions;
+    }
+    _permissionPreflightTriggered = true;
+    return _ensureRequiredPermissions();
+  }
+
+  /// Public retry hook for the fallback UI after user grants permissions.
+  Future<void> retryPermissionFlow() async {
+    final granted = await _ensureRequiredPermissions();
+    if (granted && _status != IsometrikCallStatus.ended) {
+      await _connectAndPublish();
+    }
+  }
+
+  /// Opens app settings so user can manually grant blocked permissions.
+  Future<bool> openPermissionSettings() {
+    return openAppSettings();
   }
 
   // ---------------------------------------------------------------------------
@@ -253,10 +406,65 @@ class IsometrikCallController extends ChangeNotifier {
     notifyListeners();
   }
 
+  /// Enable/disable local camera stream without ending the call.
+  Future<void> toggleLocalVideo() async {
+    if (!hasVideo || _status == IsometrikCallStatus.ended) return;
+
+    final target = !_localVideoEnabled;
+    if (target) {
+      final granted = await _ensureRequiredPermissionsForVideoUpgrade();
+      if (!granted) return;
+    }
+
+    _localVideoEnabled = target;
+    notifyListeners();
+
+    final local = _liveKit.currentRoom?.localParticipant;
+    if (local == null) return;
+    try {
+      await local.setCameraEnabled(
+        target,
+        cameraCaptureOptions: CameraCaptureOptions(
+          cameraPosition:
+              _isFrontCamera ? CameraPosition.front : CameraPosition.back,
+        ),
+      );
+    } catch (e) {
+      debugPrint('IsometrikCallController: toggleLocalVideo error: $e');
+    }
+    notifyListeners();
+  }
+
+  /// Switches active camera between front and back.
+  Future<void> flipCamera() async {
+    if (!hasVideo || !_localVideoEnabled || _status == IsometrikCallStatus.ended) {
+      return;
+    }
+
+    _isFrontCamera = !_isFrontCamera;
+    notifyListeners();
+
+    final local = _liveKit.currentRoom?.localParticipant;
+    if (local == null) return;
+    try {
+      await local.setCameraEnabled(
+        true,
+        cameraCaptureOptions: CameraCaptureOptions(
+          cameraPosition:
+              _isFrontCamera ? CameraPosition.front : CameraPosition.back,
+        ),
+      );
+    } catch (e) {
+      debugPrint('IsometrikCallController: flipCamera error: $e');
+    }
+    notifyListeners();
+  }
+
   /// End the call: disconnect media, end CallKit, leave meeting.
   Future<void> endCall() async {
     if (_status == IsometrikCallStatus.ended) return;
     _setStatus(IsometrikCallStatus.ended);
+    _isMinimized = false;
     await _liveKit.disconnect();
     try {
       await sdk.endNativeCall();
@@ -283,14 +491,50 @@ class IsometrikCallController extends ChangeNotifier {
     notifyListeners();
 
     if (accept) {
+      final granted = await _ensureRequiredPermissionsForVideoUpgrade();
+      if (!granted) {
+        _publishBusy = false;
+        notifyListeners();
+        return;
+      }
       await sdk.publishVideoUpgradeAccepted(meetingId: meetingId);
       hasVideo = true;
+      _localVideoEnabled = true;
+      await _syncLocalMediaState();
     } else {
       await sdk.publishVideoUpgradeRejected(meetingId: meetingId);
     }
     _videoUpgradeRequest = null;
     _publishBusy = false;
     notifyListeners();
+  }
+
+  /// Video upgrade is only allowed when both microphone and camera are granted.
+  Future<bool> _ensureRequiredPermissionsForVideoUpgrade() async {
+    final previousHasVideo = hasVideo;
+    hasVideo = true;
+    final granted = await _ensureRequiredPermissions();
+    if (!granted) {
+      hasVideo = previousHasVideo;
+    }
+    return granted;
+  }
+
+  Future<void> _syncLocalMediaState() async {
+    if (_status == IsometrikCallStatus.ended) return;
+    final local = _liveKit.currentRoom?.localParticipant;
+    if (local == null) return;
+    try {
+      await local.setCameraEnabled(
+        hasVideo && _localVideoEnabled,
+        cameraCaptureOptions: CameraCaptureOptions(
+          cameraPosition:
+              _isFrontCamera ? CameraPosition.front : CameraPosition.back,
+        ),
+      );
+    } catch (e) {
+      debugPrint('IsometrikCallController: syncLocalMediaState error: $e');
+    }
   }
 
   /// Handle incoming call acceptance — call accept API, then connect media.
@@ -305,6 +549,20 @@ class IsometrikCallController extends ChangeNotifier {
       case IsometrikFailure():
         _setStatus(IsometrikCallStatus.ended);
     }
+  }
+
+  /// Marks the call UI as minimized/restored.
+  void setMinimized(bool value) {
+    if (_isMinimized == value) return;
+    _isMinimized = value;
+    notifyListeners();
+  }
+
+  /// Persists floating window drag position so it can be restored.
+  void setMinimizedWindowOffset(Offset value) {
+    if (_minimizedWindowOffset == value) return;
+    _minimizedWindowOffset = value;
+    notifyListeners();
   }
 
   @override

@@ -48,6 +48,21 @@ Add **Privacy** strings in `ios/Runner/Info.plist` as needed, for example:
 <string>Needed for video calls</string>
 ```
 
+If you use `permission_handler` (the SDK does), also enable iOS permission
+handlers in `ios/Podfile` `post_install`:
+
+```ruby
+target.build_configurations.each do |config|
+  config.build_settings['GCC_PREPROCESSOR_DEFINITIONS'] ||= [
+    '$(inherited)',
+    'PERMISSION_CAMERA=1',
+    'PERMISSION_MICROPHONE=1',
+  ]
+end
+```
+
+Then run `flutter clean && flutter pub get && cd ios && pod install`.
+
 > **Note:** Android does not use CallKit/PushKit. REST + MQTT work; native call UI is your responsibility (e.g. ConnectionService) if you need system-level calls.
 
 ---
