@@ -43,8 +43,13 @@ class IsometrikMeeting {
 
   factory IsometrikMeeting.fromJson(Map<String, dynamic> json) {
     final membersRaw = json['members'] as List<dynamic>?;
+    final dynamic rawRtcToken =
+        json['rtcToken'] ?? json['token'] ?? json['roomToken'];
+    final dynamic rawMeetingId =
+        json['meetingId'] ?? json['roomId'] ?? json['meeting_id'];
+    final dynamic rawCustomType = json['customType'] ?? json['callType'];
     return IsometrikMeeting(
-      rtcToken: json['rtcToken'] as String?,
+      rtcToken: rawRtcToken is String ? rawRtcToken : null,
       uid: json['uid'] as int?,
       action: json['action'] as String?,
       createdBy: json['createdBy'] as String?,
@@ -53,7 +58,7 @@ class IsometrikMeeting {
           ?.map((e) => IsometrikCallMember.fromJson(e as Map<String, dynamic>))
           .toList(),
       meetingImageUrl: json['meetingImageUrl'] as String?,
-      meetingId: json['meetingId'] as String?,
+      meetingId: rawMeetingId is String ? rawMeetingId : null,
       meetingDescription: json['meetingDescription'] as String?,
       initiatorName: json['initiatorName'] as String?,
       initiatorImageUrl: json['initiatorImageUrl'] as String?,
@@ -61,7 +66,7 @@ class IsometrikMeeting {
       senderName: json['senderName'] as String?,
       senderId: json['senderId'] as String?,
       body: json['body'] as String?,
-      customType: json['customType'] as String?,
+      customType: rawCustomType is String ? rawCustomType : null,
       creationTime: json['creationTime'] as int?,
     );
   }
@@ -85,11 +90,21 @@ class IsometrikMeeting {
   final int? creationTime;
 
   IsometrikLiveCallType get callType {
-    final raw = customType ?? '';
-    return IsometrikLiveCallType.values.firstWhere(
-      (t) => t.apiValue == raw,
-      orElse: () => IsometrikLiveCallType.audioCall,
-    );
+    final raw = (customType ?? '').trim();
+    if (raw.isEmpty) {
+      return IsometrikLiveCallType.audioCall;
+    }
+    final normalized = raw.toLowerCase().replaceAll(RegExp(r'[^a-z0-9]'), '');
+    for (final type in IsometrikLiveCallType.values) {
+      final candidate = type.apiValue
+          .toLowerCase()
+          .replaceAll(RegExp(r'[^a-z0-9]'), '');
+      if (candidate == normalized) {
+        return type;
+      }
+    }
+    // Backward-compatible fallback when server introduces new/unknown values.
+    return IsometrikLiveCallType.audioCall;
   }
 
   IsometrikMeetingAction get meetingAction =>

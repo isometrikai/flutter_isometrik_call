@@ -701,7 +701,7 @@ class IsometrikCallSdk {
     await native.reportIncomingCall(
       callerName: meeting.initiatorName ?? 'Unknown',
       callId: meeting.meetingId ?? '',
-      hasVideo: meeting.callType == IsometrikLiveCallType.videoCall,
+      hasVideo: meeting.callType != IsometrikLiveCallType.audioCall,
       metadata: meeting.toJson(),
     );
     final cfg = session.configuration;
@@ -858,13 +858,18 @@ class IsometrikCallSdk {
       final r = await acceptCall(meetingId: meetingId);
       switch (r) {
         case IsometrikSuccess(:final data):
+          final resolvedMeetingId =
+              data.meetingId ?? pending?.meetingId ?? meetingId;
+          final resolvedRtcToken = data.rtcToken ?? pending?.rtcToken;
+          final resolvedCallType = data.customType ?? pending?.customType;
           final controller = IsometrikCallController(
             sdk: this,
-            meetingId: data.meetingId ?? meetingId,
+            meetingId: resolvedMeetingId,
             peerName: pending?.initiatorName ?? data.initiatorName ?? 'Unknown',
             isOutgoing: false,
-            hasVideo: data.callType != IsometrikLiveCallType.audioCall,
-            rtcToken: data.rtcToken,
+            hasVideo: IsometrikMeeting(customType: resolvedCallType).callType !=
+                IsometrikLiveCallType.audioCall,
+            rtcToken: resolvedRtcToken,
             peerImageUrl: pending?.initiatorImageUrl,
             initialStatus: IsometrikCallStatus.connecting,
             preflightPermissionsOnInit: _triggerPermissionsOnIncomingAccept,
