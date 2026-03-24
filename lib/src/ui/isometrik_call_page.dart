@@ -641,6 +641,14 @@ class _IsometrikCallPageState extends State<IsometrikCallPage> {
   }
 
   Widget _buildDefaultControls(bool isEnded, bool permissionBlocked) {
+    void safeAction(Future<void> Function() action) {
+      unawaited(
+        action().catchError((Object error, StackTrace stackTrace) {
+          debugPrint('IsometrikCallPage control action failed: $error');
+        }),
+      );
+    }
+
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 32),
       child: Row(
@@ -650,34 +658,40 @@ class _IsometrikCallPageState extends State<IsometrikCallPage> {
             icon: _ctrl.isMuted ? Icons.mic_off : Icons.mic,
             label: _ctrl.isMuted ? 'Unmute' : 'Mute',
             isActive: _ctrl.isMuted,
-            onTap: (isEnded || permissionBlocked) ? null : _ctrl.toggleMute,
+            onTap: (isEnded || permissionBlocked)
+                ? null
+                : () => safeAction(_ctrl.toggleMute),
           ),
           if (_ctrl.hasVideo)
             _CallControlButton(
               icon: _ctrl.isLocalVideoEnabled ? Icons.videocam : Icons.videocam_off,
-              label: _ctrl.isLocalVideoEnabled ? 'Video On' : 'Video Off',
+              label: _ctrl.isLocalVideoEnabled ? 'Video Off' : 'Video On',
               isActive: !_ctrl.isLocalVideoEnabled,
-              onTap: (isEnded || permissionBlocked) ? null : _ctrl.toggleLocalVideo,
+              onTap: (isEnded || permissionBlocked)
+                  ? null
+                  : () => safeAction(_ctrl.toggleLocalVideo),
             ),
           if (_ctrl.hasVideo)
             _CallControlButton(
               icon: Icons.cameraswitch,
-              label: _ctrl.isFrontCamera ? 'Front Cam' : 'Rear Cam',
+              label: _ctrl.isFrontCamera ? 'Switch Rear' : 'Switch Front',
               onTap: (isEnded || permissionBlocked || !_ctrl.isLocalVideoEnabled)
                   ? null
-                  : _ctrl.flipCamera,
+                  : () => safeAction(_ctrl.flipCamera),
             ),
           _CallControlButton(
             icon: _ctrl.isSpeaker ? Icons.volume_up : Icons.volume_down,
             label: _ctrl.isSpeaker ? 'Speaker' : 'Earpiece',
             isActive: _ctrl.isSpeaker,
-            onTap: (isEnded || permissionBlocked) ? null : _ctrl.toggleSpeaker,
+            onTap: (isEnded || permissionBlocked)
+                ? null
+                : () => safeAction(_ctrl.toggleSpeaker),
           ),
           _CallControlButton(
             icon: Icons.call_end,
             label: 'End',
             backgroundColor: Colors.red,
-            onTap: isEnded ? null : _ctrl.endCall,
+            onTap: isEnded ? null : () => safeAction(_ctrl.endCall),
           ),
         ],
       ),
