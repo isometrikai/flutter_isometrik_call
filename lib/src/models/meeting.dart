@@ -38,6 +38,7 @@ class IsometrikMeeting {
     this.senderId,
     this.body,
     this.customType,
+    this.audioOnly,
     this.creationTime,
   });
 
@@ -48,6 +49,7 @@ class IsometrikMeeting {
     final dynamic rawMeetingId =
         json['meetingId'] ?? json['roomId'] ?? json['meeting_id'];
     final dynamic rawCustomType = json['customType'] ?? json['callType'];
+    final dynamic rawAudioOnly = json['audioOnly'];
     return IsometrikMeeting(
       rtcToken: rawRtcToken is String ? rawRtcToken : null,
       uid: json['uid'] as int?,
@@ -67,6 +69,7 @@ class IsometrikMeeting {
       senderId: json['senderId'] as String?,
       body: json['body'] as String?,
       customType: rawCustomType is String ? rawCustomType : null,
+      audioOnly: rawAudioOnly is bool ? rawAudioOnly : null,
       creationTime: json['creationTime'] as int?,
     );
   }
@@ -87,11 +90,16 @@ class IsometrikMeeting {
   final String? senderId;
   final String? body;
   final String? customType;
+  final bool? audioOnly;
   final int? creationTime;
 
   IsometrikLiveCallType get callType {
     final raw = (customType ?? '').trim();
     if (raw.isEmpty) {
+      // Some payloads omit customType but include audioOnly.
+      if (audioOnly == false) {
+        return IsometrikLiveCallType.videoCall;
+      }
       return IsometrikLiveCallType.audioCall;
     }
     final normalized = raw.toLowerCase().replaceAll(RegExp(r'[^a-z0-9]'), '');
@@ -128,6 +136,7 @@ class IsometrikMeeting {
     if (senderId != null) 'senderId': senderId,
     if (body != null) 'body': body,
     if (customType != null) 'customType': customType,
+    if (audioOnly != null) 'audioOnly': audioOnly,
     if (creationTime != null) 'creationTime': creationTime,
   };
 }
