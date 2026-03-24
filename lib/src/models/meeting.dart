@@ -50,6 +50,19 @@ class IsometrikMeeting {
         json['meetingId'] ?? json['roomId'] ?? json['meeting_id'];
     final dynamic rawCustomType = json['customType'] ?? json['callType'];
     final dynamic rawAudioOnly = json['audioOnly'];
+    final parsedAudioOnly = switch (rawAudioOnly) {
+      bool v => v,
+      int v => v != 0,
+      String v => v.toLowerCase() == 'true' || v == '1',
+      _ => null,
+    };
+    final initiatorName = (json['initiatorName'] ??
+            json['initiatorUserName'] ??
+            json['createdByName'] ??
+            json['callerName']) as String?;
+    final initiatorIdentifier = (json['initiatorIdentifier'] ??
+            json['initiatorId'] ??
+            json['callerId']) as String?;
     return IsometrikMeeting(
       rtcToken: rawRtcToken is String ? rawRtcToken : null,
       uid: json['uid'] as int?,
@@ -62,14 +75,14 @@ class IsometrikMeeting {
       meetingImageUrl: json['meetingImageUrl'] as String?,
       meetingId: rawMeetingId is String ? rawMeetingId : null,
       meetingDescription: json['meetingDescription'] as String?,
-      initiatorName: json['initiatorName'] as String?,
+      initiatorName: initiatorName,
       initiatorImageUrl: json['initiatorImageUrl'] as String?,
-      initiatorIdentifier: json['initiatorIdentifier'] as String?,
+      initiatorIdentifier: initiatorIdentifier,
       senderName: json['senderName'] as String?,
       senderId: json['senderId'] as String?,
       body: json['body'] as String?,
       customType: rawCustomType is String ? rawCustomType : null,
-      audioOnly: rawAudioOnly is bool ? rawAudioOnly : null,
+      audioOnly: parsedAudioOnly,
       creationTime: json['creationTime'] as int?,
     );
   }

@@ -156,6 +156,65 @@ class IsometrikCallSdk {
 
   IsometrikCallConfiguration? get configuration => session.configuration;
 
+  String _firstNonEmpty(List<String?> values, {String fallback = ''}) {
+    for (final value in values) {
+      final trimmed = value?.trim();
+      if (trimmed != null && trimmed.isNotEmpty) {
+        return trimmed;
+      }
+    }
+    return fallback;
+  }
+
+  String _resolvePeerName({
+    IsometrikMeeting? primary,
+    IsometrikMeeting? secondary,
+    String fallback = 'Unknown',
+  }) {
+    final fromMembers = <String?>[
+      (primary?.members != null && primary!.members!.isNotEmpty)
+          ? primary.members!.first.memberName
+          : null,
+      (secondary?.members != null && secondary!.members!.isNotEmpty)
+          ? secondary.members!.first.memberName
+          : null,
+    ];
+    return _firstNonEmpty(<String?>[
+      primary?.initiatorName,
+      secondary?.initiatorName,
+      primary?.senderName,
+      secondary?.senderName,
+      ...fromMembers,
+      primary?.initiatorIdentifier,
+      secondary?.initiatorIdentifier,
+      primary?.senderId,
+      secondary?.senderId,
+      primary?.createdBy,
+      secondary?.createdBy,
+    ], fallback: fallback);
+  }
+
+  IsometrikLiveCallType _resolveCallType({
+    IsometrikMeeting? primary,
+    IsometrikMeeting? secondary,
+    IsometrikLiveCallType fallback = IsometrikLiveCallType.audioCall,
+  }) {
+    final customType = _firstNonEmpty(<String?>[
+      primary?.customType,
+      secondary?.customType,
+    ]);
+    if (customType.isNotEmpty) {
+      return IsometrikMeeting(customType: customType).callType;
+    }
+    final audioOnly = primary?.audioOnly ?? secondary?.audioOnly;
+    if (audioOnly != null) {
+      return audioOnly
+          ? IsometrikLiveCallType.audioCall
+          : IsometrikLiveCallType.videoCall;
+    }
+    return fallback;
+  }
+
   Future<IsometrikCallPermissionsResult> ensureCallPermissions({
     required bool hasVideo,
   }) async {
@@ -583,8 +642,12 @@ class IsometrikCallSdk {
         if (rtc == null) {
           return const IsometrikFailure(IsometrikInvalidResponse());
         }
-        final displayName = data.initiatorName ?? 'Meeting';
-        final hasVideo = data.callType != IsometrikLiveCallType.audioCall;
+        final displayName = _resolvePeerName(
+          primary: data,
+          fallback: 'Meeting',
+        );
+        final hasVideo = _resolveCallType(primary: data) !=
+            IsometrikLiveCallType.audioCall;
         await _startOutgoingCallSkippingSimulatorFailures(
           native,
           callee: IsometrikCallDisplayUser(
@@ -699,7 +762,7 @@ class IsometrikCallSdk {
     meetingRouterContext.callDetailsMeetingId = meeting.meetingId;
     meetingRouterContext.nativeCallActive = true;
     await native.reportIncomingCall(
-      callerName: meeting.initiatorName ?? 'Unknown',
+      callerName: _resolvePeerName(primary: meeting),
       callId: meeting.meetingId ?? '',
       hasVideo: meeting.callType != IsometrikLiveCallType.audioCall,
       metadata: meeting.toJson(),
@@ -861,14 +924,16 @@ class IsometrikCallSdk {
           final resolvedMeetingId =
               data.meetingId ?? pending?.meetingId ?? meetingId;
           final resolvedRtcToken = data.rtcToken ?? pending?.rtcToken;
-          final resolvedCallType = data.customType ?? pending?.customType;
+          final resolvedCallType = _resolveCallType(
+            primary: data,
+            secondary: pending,
+          );
           final controller = IsometrikCallController(
             sdk: this,
             meetingId: resolvedMeetingId,
-            peerName: pending?.initiatorName ?? data.initiatorName ?? 'Unknown',
+            peerName: _resolvePeerName(primary: data, secondary: pending),
             isOutgoing: false,
-            hasVideo: IsometrikMeeting(customType: resolvedCallType).callType !=
-                IsometrikLiveCallType.audioCall,
+            hasVideo: resolvedCallType != IsometrikLiveCallType.audioCall,
             rtcToken: resolvedRtcToken,
             peerImageUrl: pending?.initiatorImageUrl,
             initialStatus: IsometrikCallStatus.connecting,

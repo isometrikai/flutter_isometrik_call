@@ -16,6 +16,51 @@ class MeetingsPage extends StatefulWidget {
 class _MeetingsPageState extends State<MeetingsPage> {
   Future<List<IsometrikMeeting>>? _future;
 
+  String _resolvePeerName({
+    required IsometrikMeeting joined,
+    required IsometrikMeeting listed,
+  }) {
+    final candidates = <String?>[
+      joined.initiatorName,
+      listed.initiatorName,
+      joined.senderName,
+      listed.senderName,
+      joined.members != null && joined.members!.isNotEmpty
+          ? joined.members!.first.memberName
+          : null,
+      listed.members != null && listed.members!.isNotEmpty
+          ? listed.members!.first.memberName
+          : null,
+      joined.initiatorIdentifier,
+      listed.initiatorIdentifier,
+      joined.createdBy,
+      listed.createdBy,
+    ];
+    for (final value in candidates) {
+      final text = value?.trim();
+      if (text != null && text.isNotEmpty) {
+        return text;
+      }
+    }
+    return 'Peer';
+  }
+
+  bool _resolveHasVideo({
+    required IsometrikMeeting joined,
+    required IsometrikMeeting listed,
+  }) {
+    final customType = (joined.customType ?? listed.customType ?? '').trim();
+    if (customType.isNotEmpty) {
+      return IsometrikMeeting(customType: customType).callType !=
+          IsometrikLiveCallType.audioCall;
+    }
+    final audioOnly = joined.audioOnly ?? listed.audioOnly;
+    if (audioOnly != null) {
+      return !audioOnly;
+    }
+    return false;
+  }
+
   @override
   void initState() {
     super.initState();
@@ -49,9 +94,9 @@ class _MeetingsPageState extends State<MeetingsPage> {
     final controller = IsometrikCallController(
       sdk: c.sdk,
       meetingId: joined.meetingId ?? meeting.meetingId ?? '',
-      peerName: joined.initiatorName ?? 'Peer',
+      peerName: _resolvePeerName(joined: joined, listed: meeting),
       isOutgoing: false,
-      hasVideo: joined.callType != IsometrikLiveCallType.audioCall,
+      hasVideo: _resolveHasVideo(joined: joined, listed: meeting),
       rtcToken: joined.rtcToken,
       initialStatus: IsometrikCallStatus.connecting,
     );
