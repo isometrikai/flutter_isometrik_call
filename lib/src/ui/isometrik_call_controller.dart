@@ -295,6 +295,7 @@ class IsometrikCallController extends ChangeNotifier {
       try {
         await _liveKit.connect(url: url, token: token);
         await _syncLocalMediaState();
+        await _syncLocalAudioState();
       } catch (e) {
         debugPrint('IsometrikCallController: LiveKit connect error: $e');
       }
@@ -425,6 +426,14 @@ class IsometrikCallController extends ChangeNotifier {
     try {
       await sdk.native.setMute(_muted);
     } catch (_) {}
+    final local = _liveKit.currentRoom?.localParticipant;
+    if (local != null) {
+      try {
+        await local.setMicrophoneEnabled(!_muted);
+      } catch (e) {
+        debugPrint('IsometrikCallController: toggleMute error: $e');
+      }
+    }
     notifyListeners();
   }
 
@@ -434,6 +443,14 @@ class IsometrikCallController extends ChangeNotifier {
     try {
       await sdk.native.setSpeaker(_speaker);
     } catch (_) {}
+    final room = _liveKit.currentRoom;
+    if (room != null) {
+      try {
+        await room.setSpeakerOn(_speaker);
+      } catch (e) {
+        debugPrint('IsometrikCallController: toggleSpeaker error: $e');
+      }
+    }
     notifyListeners();
   }
 
@@ -510,9 +527,14 @@ class IsometrikCallController extends ChangeNotifier {
     if (_publishBusy || meetingId.isEmpty) return;
     _publishBusy = true;
     notifyListeners();
-    await sdk.publishVideoUpgradeRequest(meetingId: meetingId);
-    _publishBusy = false;
-    notifyListeners();
+    try {
+      await sdk.publishVideoUpgradeRequest(meetingId: meetingId);
+    } catch (e) {
+      debugPrint('IsometrikCallController: requestVideoUpgrade error: $e');
+    } finally {
+      _publishBusy = false;
+      notifyListeners();
+    }
   }
 
   /// Accept or decline an incoming video upgrade request.
@@ -521,23 +543,24 @@ class IsometrikCallController extends ChangeNotifier {
     _publishBusy = true;
     notifyListeners();
 
-    if (accept) {
-      final granted = await _ensureRequiredPermissionsForVideoUpgrade();
-      if (!granted) {
-        _publishBusy = false;
-        notifyListeners();
-        return;
+    try {
+      if (accept) {
+        final granted = await _ensureRequiredPermissionsForVideoUpgrade();
+        if (!granted) return;
+        await sdk.publishVideoUpgradeAccepted(meetingId: meetingId);
+        hasVideo = true;
+        _localVideoEnabled = true;
+        await _syncLocalMediaState();
+      } else {
+        await sdk.publishVideoUpgradeRejected(meetingId: meetingId);
       }
-      await sdk.publishVideoUpgradeAccepted(meetingId: meetingId);
-      hasVideo = true;
-      _localVideoEnabled = true;
-      await _syncLocalMediaState();
-    } else {
-      await sdk.publishVideoUpgradeRejected(meetingId: meetingId);
+      _videoUpgradeRequest = null;
+    } catch (e) {
+      debugPrint('IsometrikCallController: respondToVideoUpgrade error: $e');
+    } finally {
+      _publishBusy = false;
+      notifyListeners();
     }
-    _videoUpgradeRequest = null;
-    _publishBusy = false;
-    notifyListeners();
   }
 
   /// Video upgrade is only allowed when both microphone and camera are granted.
@@ -565,6 +588,19 @@ class IsometrikCallController extends ChangeNotifier {
       );
     } catch (e) {
       debugPrint('IsometrikCallController: syncLocalMediaState error: $e');
+    }
+  }
+
+  Future<void> _syncLocalAudioState() async {
+    if (_status == IsometrikCallStatus.ended) return;
+    final room = _liveKit.currentRoom;
+    final local = room?.localParticipant;
+    if (local == null || room == null) return;
+    try {
+      await local.setMicrophoneEnabled(!_muted);
+      await room.setSpeakerOn(_speaker);
+    } catch (e) {
+      debugPrint('IsometrikCallController: syncLocalAudioState error: $e');
     }
   }
 

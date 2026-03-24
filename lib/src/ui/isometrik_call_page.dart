@@ -162,6 +162,16 @@ class _IsometrikCallPageState extends State<IsometrikCallPage> {
   IsometrikCallController get _ctrl => widget.controller;
   IsometrikCallPageConfig get _cfg => widget.config;
 
+  void _runAction(Future<void> Function() action, {String? label}) {
+    unawaited(
+      action().catchError((Object error, StackTrace stackTrace) {
+        debugPrint(
+          'IsometrikCallPage action${label != null ? ' [$label]' : ''} failed: $error',
+        );
+      }),
+    );
+  }
+
   @override
   void initState() {
     super.initState();
@@ -547,7 +557,10 @@ class _IsometrikCallPageState extends State<IsometrikCallPage> {
                     child: FilledButton(
                       onPressed: _ctrl.isPublishBusy
                           ? null
-                          : () => _ctrl.respondToVideoUpgrade(accept: true),
+                          : () => _runAction(
+                                () => _ctrl.respondToVideoUpgrade(accept: true),
+                                label: 'video_upgrade_accept',
+                              ),
                       style: FilledButton.styleFrom(
                         backgroundColor: Colors.green,
                       ),
@@ -559,7 +572,10 @@ class _IsometrikCallPageState extends State<IsometrikCallPage> {
                     child: OutlinedButton(
                       onPressed: _ctrl.isPublishBusy
                           ? null
-                          : () => _ctrl.respondToVideoUpgrade(accept: false),
+                          : () => _runAction(
+                                () => _ctrl.respondToVideoUpgrade(accept: false),
+                                label: 'video_upgrade_decline',
+                              ),
                       style: OutlinedButton.styleFrom(
                         foregroundColor: Colors.white70,
                         side: const BorderSide(color: Colors.white24),
@@ -581,7 +597,12 @@ class _IsometrikCallPageState extends State<IsometrikCallPage> {
       padding: const EdgeInsets.only(bottom: 20),
       child: Center(
         child: TextButton.icon(
-          onPressed: _ctrl.isPublishBusy ? null : _ctrl.requestVideoUpgrade,
+          onPressed: _ctrl.isPublishBusy
+              ? null
+              : () => _runAction(
+                    _ctrl.requestVideoUpgrade,
+                    label: 'video_upgrade_request',
+                  ),
           icon: const Icon(Icons.videocam, color: Colors.white60),
           label: Text(
             _ctrl.isPublishBusy ? 'Sending…' : 'Request video call',
@@ -613,7 +634,10 @@ class _IsometrikCallPageState extends State<IsometrikCallPage> {
                 children: <Widget>[
                   Expanded(
                     child: OutlinedButton(
-                      onPressed: _ctrl.retryPermissionFlow,
+                      onPressed: () => _runAction(
+                        _ctrl.retryPermissionFlow,
+                        label: 'permission_retry',
+                      ),
                       style: OutlinedButton.styleFrom(
                         foregroundColor: Colors.white70,
                         side: const BorderSide(color: Colors.white30),
@@ -624,7 +648,12 @@ class _IsometrikCallPageState extends State<IsometrikCallPage> {
                   const SizedBox(width: 10),
                   Expanded(
                     child: FilledButton(
-                      onPressed: _ctrl.openPermissionSettings,
+                      onPressed: () => _runAction(
+                        () async {
+                          await _ctrl.openPermissionSettings();
+                        },
+                        label: 'open_settings',
+                      ),
                       style: FilledButton.styleFrom(
                         backgroundColor: Colors.orange,
                       ),
@@ -641,14 +670,6 @@ class _IsometrikCallPageState extends State<IsometrikCallPage> {
   }
 
   Widget _buildDefaultControls(bool isEnded, bool permissionBlocked) {
-    void safeAction(Future<void> Function() action) {
-      unawaited(
-        action().catchError((Object error, StackTrace stackTrace) {
-          debugPrint('IsometrikCallPage control action failed: $error');
-        }),
-      );
-    }
-
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 32),
       child: Row(
@@ -660,7 +681,7 @@ class _IsometrikCallPageState extends State<IsometrikCallPage> {
             isActive: _ctrl.isMuted,
             onTap: (isEnded || permissionBlocked)
                 ? null
-                : () => safeAction(_ctrl.toggleMute),
+                : () => _runAction(_ctrl.toggleMute, label: 'toggle_mute'),
           ),
           if (_ctrl.hasVideo)
             _CallControlButton(
@@ -669,7 +690,10 @@ class _IsometrikCallPageState extends State<IsometrikCallPage> {
               isActive: !_ctrl.isLocalVideoEnabled,
               onTap: (isEnded || permissionBlocked)
                   ? null
-                  : () => safeAction(_ctrl.toggleLocalVideo),
+                  : () => _runAction(
+                        _ctrl.toggleLocalVideo,
+                        label: 'toggle_local_video',
+                      ),
             ),
           if (_ctrl.hasVideo)
             _CallControlButton(
@@ -677,7 +701,7 @@ class _IsometrikCallPageState extends State<IsometrikCallPage> {
               label: _ctrl.isFrontCamera ? 'Switch Rear' : 'Switch Front',
               onTap: (isEnded || permissionBlocked || !_ctrl.isLocalVideoEnabled)
                   ? null
-                  : () => safeAction(_ctrl.flipCamera),
+                  : () => _runAction(_ctrl.flipCamera, label: 'flip_camera'),
             ),
           _CallControlButton(
             icon: _ctrl.isSpeaker ? Icons.volume_up : Icons.volume_down,
@@ -685,13 +709,13 @@ class _IsometrikCallPageState extends State<IsometrikCallPage> {
             isActive: _ctrl.isSpeaker,
             onTap: (isEnded || permissionBlocked)
                 ? null
-                : () => safeAction(_ctrl.toggleSpeaker),
+                : () => _runAction(_ctrl.toggleSpeaker, label: 'toggle_speaker'),
           ),
           _CallControlButton(
             icon: Icons.call_end,
             label: 'End',
             backgroundColor: Colors.red,
-            onTap: isEnded ? null : () => safeAction(_ctrl.endCall),
+            onTap: isEnded ? null : () => _runAction(_ctrl.endCall, label: 'end_call'),
           ),
         ],
       ),
