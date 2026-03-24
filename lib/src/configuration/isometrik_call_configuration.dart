@@ -14,6 +14,7 @@ class IsometrikCallConfiguration {
     this.callHangupTimeOnNoAnswerSeconds = 60,
     this.streamingUrl = 'wss://streaming.isometrik.io',
     this.videoCallOption = true,
+    this.androidIncomingRingtoneUri,
   });
 
   final String accountId;
@@ -41,6 +42,15 @@ class IsometrikCallConfiguration {
 
   final bool videoCallOption;
 
+  /// Optional custom ringtone URI for Android incoming calls.
+  ///
+  /// Example values:
+  /// - `content://media/internal/audio/media/105`
+  /// - `android.resource://com.example.app/raw/incoming_call`
+  ///
+  /// If null/empty/invalid, SDK falls back to device default ringtone.
+  final String? androidIncomingRingtoneUri;
+
   Map<String, dynamic> toNativeMap() {
     return <String, dynamic>{
       'accountId': accountId,
@@ -56,6 +66,7 @@ class IsometrikCallConfiguration {
       'callHangupTimeOnNoAnswerSeconds': callHangupTimeOnNoAnswerSeconds,
       'streamingUrl': streamingUrl,
       'videoCallOption': videoCallOption,
+      'androidIncomingRingtoneUri': androidIncomingRingtoneUri,
     };
   }
 }
