@@ -256,37 +256,55 @@ class IsometrikFlutterCallPlugin :
         hangupRunnable = null
     }
 
-    private fun startIncomingRingtone() {
-        stopIncomingRingtone()
-        val hostActivity = activity ?: return
-        try {
-            val customUri = configuredIncomingRingtoneUri?.takeIf { it.isNotBlank() }?.let { raw ->
+    private fun resolveIncomingRingtoneUri(): Uri? {
+        val customUri = configuredIncomingRingtoneUri
+            ?.takeIf { it.isNotBlank() }
+            ?.let { raw ->
                 try {
                     Uri.parse(raw)
                 } catch (_: Throwable) {
                     null
                 }
             }
-            val uri =
-                customUri
-                    ?: RingtoneManager.getDefaultUri(RingtoneManager.TYPE_RINGTONE)
-                    ?: RingtoneManager.getDefaultUri(RingtoneManager.TYPE_NOTIFICATION)
-            if (customUri != null && uri == null) {
-                Log.w(logTag, "Custom ringtone URI invalid/unavailable, falling back to default")
-            }
-            val ringtone = RingtoneManager.getRingtone(hostActivity, uri) ?: return
-            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.P) {
-                ringtone.isLooping = true
-            }
-            ringtone.audioAttributes =
-                AudioAttributes.Builder()
+        val resolved =
+            customUri
+                ?: RingtoneManager.getDefaultUri(RingtoneManager.TYPE_RINGTONE)
+                ?: RingtoneManager.getDefaultUri(RingtoneManager.TYPE_NOTIFICATION)
+        if (customUri != null && resolved == null) {
+            Log.w(logTag, "Custom ringtone URI invalid/unavailable, falling back to default")
+        }
+        return resolved
+    }
+
+    private fun startIncomingRingtone() {
+        stopIncomingRingtone()
+        val context = applicationContext ?: activity ?: return
+        val uri = resolveIncomingRingtoneUri() ?: return
+
+        // Ensure ringtone playback happens on the main thread.
+        mainHandler.post {
+            try {
+                stopIncomingRingtone()
+                val ringtone = RingtoneManager.getRingtone(context, uri) ?: return@post
+                if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.P) {
+                    ringtone.isLooping = true
+                }
+                // Ensure the ringtone is routed through the "ring" audio stream.
+                ringtone.audioAttributes = AudioAttributes.Builder()
                     .setUsage(AudioAttributes.USAGE_NOTIFICATION_RINGTONE)
                     .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
+                    .apply {
+                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                            setLegacyStreamType(android.media.AudioManager.STREAM_RING)
+                        }
+                    }
                     .build()
-            ringtone.play()
-            incomingRingtone = ringtone
-        } catch (_: Throwable) {
-            incomingRingtone = null
+                ringtone.play()
+                incomingRingtone = ringtone
+            } catch (t: Throwable) {
+                Log.e(logTag, "startIncomingRingtone failed", t)
+                incomingRingtone = null
+            }
         }
     }
 
@@ -365,34 +383,43 @@ class IsometrikFlutterCallPlugin :
             )
 
         val caller = incomingCallerName ?: "Isometrik Call"
-        val builder =
-            NotificationCompat.Builder(context, notificationChannelId)
-                .setSmallIcon(android.R.drawable.sym_call_incoming)
-                .setContentTitle("Incoming ${if (incomingHasVideo) "video" else "audio"} call")
-                .setContentText(caller)
-                .setPriority(NotificationCompat.PRIORITY_MAX)
-                .setCategory(NotificationCompat.CATEGORY_CALL)
-                .setOngoing(true)
-                .setAutoCancel(false)
-                .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
-                .setOnlyAlertOnce(true)
-                .setContentIntent(acceptPendingIntent)
-                .setFullScreenIntent(launchActivityPendingIntent ?: acceptPendingIntent, true)
-                .addAction(
-                    NotificationCompat.Action(
-                        android.R.drawable.ic_menu_close_clear_cancel,
-                        "Reject",
-                        rejectPendingIntent
-                    )
-                )
-                .addAction(
-                    NotificationCompat.Action(
-                        android.R.drawable.ic_menu_call,
-                        "Accept",
-                        acceptPendingIntent
-                    )
-                )
+        val ringtoneUri = resolveIncomingRingtoneUri()
+        val builder = NotificationCompat.Builder(context, notificationChannelId)
+            .setSmallIcon(android.R.drawable.sym_call_incoming)
+            .setContentTitle("Incoming ${if (incomingHasVideo) "video" else "audio"} call")
+            .setContentText(caller)
+            .setPriority(NotificationCompat.PRIORITY_MAX)
+            .setCategory(NotificationCompat.CATEGORY_CALL)
+            .setOngoing(true)
+            .setAutoCancel(false)
+            .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
+            // Must alert on every incoming notification update.
+            // Using a fixed notification id would otherwise suppress the sound.
+            .setOnlyAlertOnce(false)
+            .setContentIntent(acceptPendingIntent)
+            .setFullScreenIntent(launchActivityPendingIntent ?: acceptPendingIntent, true)
 
+        if (ringtoneUri != null) {
+            builder.setSound(ringtoneUri)
+        } else {
+            // Pre-O fallback when no explicit URI is available.
+            builder.setDefaults(android.app.Notification.DEFAULT_SOUND)
+        }
+
+        builder.addAction(
+            NotificationCompat.Action(
+                android.R.drawable.ic_menu_close_clear_cancel,
+                "Reject",
+                rejectPendingIntent
+            )
+        )
+        builder.addAction(
+            NotificationCompat.Action(
+                android.R.drawable.ic_menu_call,
+                "Accept",
+                acceptPendingIntent
+            )
+        )
         try {
             NotificationManagerCompat.from(context).notify(incomingNotificationId, builder.build())
         } catch (e: Throwable) {
@@ -430,7 +457,21 @@ class IsometrikFlutterCallPlugin :
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
         val manager = context.getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager ?: return
         val existing = manager.getNotificationChannel(notificationChannelId)
-        if (existing != null) return
+        val desiredUri = resolveIncomingRingtoneUri()
+
+        // If channel exists but sound differs from what we want, recreate it so
+        // Android doesn't keep the old sound configuration.
+        if (existing != null) {
+            val currentUri = existing.sound
+            if (desiredUri != null) {
+                if (currentUri == desiredUri) return
+                manager.deleteNotificationChannel(notificationChannelId)
+            } else {
+                // No desired sound URI (unexpected). Keep existing channel to avoid churn.
+                return
+            }
+        }
+
         val channel = NotificationChannel(
             notificationChannelId,
             "Incoming Calls",
@@ -440,23 +481,12 @@ class IsometrikFlutterCallPlugin :
             lockscreenVisibility = android.app.Notification.VISIBILITY_PUBLIC
             setShowBadge(false)
             enableVibration(true)
-            val customUri = configuredIncomingRingtoneUri?.takeIf { it.isNotBlank() }?.let { raw ->
-                try {
-                    Uri.parse(raw)
-                } catch (_: Throwable) {
-                    null
-                }
-            }
-            val uri =
-                customUri
-                    ?: RingtoneManager.getDefaultUri(RingtoneManager.TYPE_RINGTONE)
-                    ?: RingtoneManager.getDefaultUri(RingtoneManager.TYPE_NOTIFICATION)
             val attrs =
                 AudioAttributes.Builder()
                     .setUsage(AudioAttributes.USAGE_NOTIFICATION_RINGTONE)
                     .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
                     .build()
-            setSound(uri, attrs)
+            setSound(desiredUri, attrs)
         }
         manager.createNotificationChannel(channel)
     }
