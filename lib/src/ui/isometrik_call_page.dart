@@ -323,17 +323,17 @@ class _IsometrikCallPageState extends State<IsometrikCallPage> {
                   right: 12,
                   child: _buildVideoUpgradeBanner(videoReq),
                 ),
-              if (_cfg.showVideoUpgradeButton &&
-                  !_ctrl.hasVideo &&
-                  _ctrl.status == IsometrikCallStatus.connected &&
-                  videoReq == null &&
-                  !permissionBlocked)
-                Positioned(
-                  left: 24,
-                  right: 24,
-                  bottom: 138,
-                  child: _buildVideoUpgradeRequestButton(),
-                ),
+              // if (_cfg.showVideoUpgradeButton &&
+              //     !_ctrl.hasVideo &&
+              //     _ctrl.status == IsometrikCallStatus.connected &&
+              //     videoReq == null &&
+              //     !permissionBlocked)
+              //   Positioned(
+              //     left: 24,
+              //     right: 24,
+              //     bottom: 138,
+              //     child: _buildVideoUpgradeRequestButton(),
+              //   ),
               Positioned(
                 left: 12,
                 right: 12,
@@ -602,36 +602,36 @@ class _IsometrikCallPageState extends State<IsometrikCallPage> {
     );
   }
 
-  Widget _buildVideoUpgradeRequestButton() {
-    return Material(
-      color: Colors.black.withValues(alpha: 0.36),
-      borderRadius: BorderRadius.circular(20),
-      child: InkWell(
-        borderRadius: BorderRadius.circular(20),
-        onTap: _ctrl.isPublishBusy
-            ? null
-            : () => _runAction(
-                  _ctrl.requestVideoUpgrade,
-                  label: 'video_upgrade_request',
-                ),
-        child: Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-          child: Row(
-            mainAxisSize: MainAxisSize.min,
-            mainAxisAlignment: MainAxisAlignment.center,
-            children: <Widget>[
-              const Icon(Icons.videocam_rounded, color: Colors.white70, size: 18),
-              const SizedBox(width: 8),
-              Text(
-                _ctrl.isPublishBusy ? 'Sending request...' : 'Switch to video call',
-                style: const TextStyle(color: Colors.white70, fontSize: 13),
-              ),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
+  // Widget _buildVideoUpgradeRequestButton() {
+  //   return Material(
+  //     color: Colors.black.withValues(alpha: 0.36),
+  //     borderRadius: BorderRadius.circular(20),
+  //     child: InkWell(
+  //       borderRadius: BorderRadius.circular(20),
+  //       onTap: _ctrl.isPublishBusy
+  //           ? null
+  //           : () => _runAction(
+  //                 _ctrl.requestVideoUpgrade,
+  //                 label: 'video_upgrade_request',
+  //               ),
+  //       child: Padding(
+  //         padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+  //         child: Row(
+  //           mainAxisSize: MainAxisSize.min,
+  //           mainAxisAlignment: MainAxisAlignment.center,
+  //           children: <Widget>[
+  //             const Icon(Icons.videocam_rounded, color: Colors.white70, size: 18),
+  //             const SizedBox(width: 8),
+  //             Text(
+  //               _ctrl.isPublishBusy ? 'Sending request...' : 'Switch to video call',
+  //               style: const TextStyle(color: Colors.white70, fontSize: 13),
+  //             ),
+  //           ],
+  //         ),
+  //       ),
+  //     ),
+  //   );
+  // }
 
   Widget _buildPermissionFallbackCard() {
     return Material(
