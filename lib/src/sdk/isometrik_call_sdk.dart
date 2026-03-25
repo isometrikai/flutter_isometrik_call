@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
+import 'package:permission_handler/permission_handler.dart';
 
 import '../api/isometrik_api_error.dart';
 import '../api/isometrik_http_client.dart';
@@ -16,6 +17,22 @@ import '../services/isometrik_mqtt_service.dart';
 import '../services/isometrik_pushkit_token_store.dart';
 import '../services/isometrik_session_state.dart';
 import '../ui/isometrik_call_controller.dart';
+
+class IsometrikCallPermissionsResult {
+  const IsometrikCallPermissionsResult({
+    required this.microphoneGranted,
+    required this.cameraGranted,
+    required this.requiresSettingsAction,
+    this.message,
+  });
+
+  final bool microphoneGranted;
+  final bool cameraGranted;
+  final bool requiresSettingsAction;
+  final String? message;
+
+  bool get isGranted => microphoneGranted && cameraGranted;
+}
 
 /// True when the Flutter method channel has no native implementation (web, tests, or
 /// plugin not registered). In that case REST/MQTT can still work; only CallKit/PushKit
@@ -138,6 +155,156 @@ class IsometrikCallSdk {
   IsometrikMeeting? _pendingIncomingMeeting;
 
   IsometrikCallConfiguration? get configuration => session.configuration;
+
+  String _firstNonEmpty(List<String?> values, {String fallback = ''}) {
+    for (final value in values) {
+      final trimmed = value?.trim();
+      if (trimmed != null && trimmed.isNotEmpty) {
+        return trimmed;
+      }
+    }
+    return fallback;
+  }
+
+  String _resolvePeerName({
+    IsometrikMeeting? primary,
+    IsometrikMeeting? secondary,
+    String fallback = 'Unknown',
+  }) {
+    final fromMembers = <String?>[
+      (primary?.members != null && primary!.members!.isNotEmpty)
+          ? primary.members!.first.memberName
+          : null,
+      (secondary?.members != null && secondary!.members!.isNotEmpty)
+          ? secondary.members!.first.memberName
+          : null,
+    ];
+    return _firstNonEmpty(<String?>[
+      primary?.initiatorName,
+      secondary?.initiatorName,
+      primary?.senderName,
+      secondary?.senderName,
+      ...fromMembers,
+      primary?.initiatorIdentifier,
+      secondary?.initiatorIdentifier,
+      primary?.senderId,
+      secondary?.senderId,
+      primary?.createdBy,
+      secondary?.createdBy,
+    ], fallback: fallback);
+  }
+
+  IsometrikLiveCallType _resolveCallType({
+    IsometrikMeeting? primary,
+    IsometrikMeeting? secondary,
+    IsometrikLiveCallType fallback = IsometrikLiveCallType.audioCall,
+  }) {
+    final customType = _firstNonEmpty(<String?>[
+      primary?.customType,
+      secondary?.customType,
+    ]);
+    if (customType.isNotEmpty) {
+      return IsometrikMeeting(customType: customType).callType;
+    }
+    final audioOnly = primary?.audioOnly ?? secondary?.audioOnly;
+    if (audioOnly != null) {
+      return audioOnly
+          ? IsometrikLiveCallType.audioCall
+          : IsometrikLiveCallType.videoCall;
+    }
+    return fallback;
+  }
+
+  Future<IsometrikCallPermissionsResult> ensureCallPermissions({
+    required bool hasVideo,
+  }) async {
+    // Android: use native plugin permission request for reliable SDK-level control.
+    if (defaultTargetPlatform == TargetPlatform.android) {
+      try {
+        final response = await native.requestRuntimePermissions(
+          requestMicrophone: true,
+          requestCamera: hasVideo,
+        );
+        final microphoneGranted = response['microphoneGranted'] == true;
+        final cameraGranted = hasVideo ? response['cameraGranted'] == true : true;
+        final requiresSettingsAction = response['requiresSettingsAction'] == true;
+        if (microphoneGranted && cameraGranted) {
+          return const IsometrikCallPermissionsResult(
+            microphoneGranted: true,
+            cameraGranted: true,
+            requiresSettingsAction: false,
+          );
+        }
+        final missing = <String>[
+          if (!microphoneGranted) 'Microphone',
+          if (!cameraGranted) 'Camera',
+        ];
+        final missingText = missing.join(' and ');
+        return IsometrikCallPermissionsResult(
+          microphoneGranted: microphoneGranted,
+          cameraGranted: cameraGranted,
+          requiresSettingsAction: requiresSettingsAction,
+          message: requiresSettingsAction
+              ? '$missingText permission is required. Please enable it from Settings.'
+              : '$missingText permission is required to continue this call.',
+        );
+      } catch (e) {
+        // Backward compatibility: if native Android side is older and does not
+        // expose `requestRuntimePermissions`, fall back to permission_handler.
+        if (_isNativeBridgeUnavailable(e)) {
+          debugPrint(
+            'IsometrikCallSdk: native Android permission bridge unavailable, '
+            'falling back to permission_handler: $e',
+          );
+        } else {
+          rethrow;
+        }
+      }
+    }
+
+    // iOS (and Android fallback): permission_handler runtime bridge.
+    if (defaultTargetPlatform == TargetPlatform.iOS ||
+        defaultTargetPlatform == TargetPlatform.android) {
+      final required = <Permission>[
+        Permission.microphone,
+        if (hasVideo) Permission.camera,
+      ];
+      final statuses = await required.request();
+      final mic = statuses[Permission.microphone]?.isGranted ?? false;
+      final cam = hasVideo ? (statuses[Permission.camera]?.isGranted ?? false) : true;
+      final needsSettings = statuses.values.any(
+        (s) => s.isPermanentlyDenied || s.isRestricted,
+      );
+      if (mic && cam) {
+        return const IsometrikCallPermissionsResult(
+          microphoneGranted: true,
+          cameraGranted: true,
+          requiresSettingsAction: false,
+        );
+      }
+      final missing = <String>[
+        if (!mic) 'Microphone',
+        if (!cam) 'Camera',
+      ];
+      final missingText = missing.join(' and ');
+      return IsometrikCallPermissionsResult(
+        microphoneGranted: mic,
+        cameraGranted: cam,
+        requiresSettingsAction: needsSettings,
+        message: needsSettings
+            ? '$missingText permission is required. Please enable it from Settings.'
+            : '$missingText permission is required to continue this call.',
+      );
+    }
+
+    return const IsometrikCallPermissionsResult(
+      microphoneGranted: true,
+      cameraGranted: true,
+      requiresSettingsAction: false,
+    );
+  }
+
+  Future<bool> openPermissionSettings() => openAppSettings();
 
   /// Direct REST access (same as Swift `ISMCallMeetingViewModel`).
   IsometrikMeetingRepository get meetings {
@@ -315,6 +482,16 @@ class IsometrikCallSdk {
     if (deviceId == null || cfg == null) {
       return const IsometrikFailure(IsometrikInvalidResponse());
     }
+    final permissions = await ensureCallPermissions(
+      hasVideo: callType == IsometrikLiveCallType.videoCall,
+    );
+    if (!permissions.isGranted) {
+      return IsometrikFailure(
+        IsometrikServerMessageError(
+          permissions.message ?? 'Required call permissions are missing.',
+        ),
+      );
+    }
     final allowed = await native.canMakeOutgoingCall();
     if (!allowed) {
       return const IsometrikFailure(
@@ -368,6 +545,16 @@ class IsometrikCallSdk {
     final cfg = session.configuration;
     if (deviceId == null || cfg == null || memberIds.isEmpty) {
       return const IsometrikFailure(IsometrikInvalidResponse());
+    }
+    final permissions = await ensureCallPermissions(
+      hasVideo: callType == IsometrikLiveCallType.videoCall,
+    );
+    if (!permissions.isGranted) {
+      return IsometrikFailure(
+        IsometrikServerMessageError(
+          permissions.message ?? 'Required call permissions are missing.',
+        ),
+      );
     }
     final allowed = await native.canMakeOutgoingCall();
     if (!allowed) {
@@ -428,6 +615,14 @@ class IsometrikCallSdk {
     if (deviceId == null || cfg == null) {
       return const IsometrikFailure(IsometrikInvalidResponse());
     }
+    final permissions = await ensureCallPermissions(hasVideo: false);
+    if (!permissions.isGranted) {
+      return IsometrikFailure(
+        IsometrikServerMessageError(
+          permissions.message ?? 'Microphone permission is required.',
+        ),
+      );
+    }
     final allowed = await native.canMakeOutgoingCall();
     if (!allowed) {
       return const IsometrikFailure(
@@ -447,8 +642,12 @@ class IsometrikCallSdk {
         if (rtc == null) {
           return const IsometrikFailure(IsometrikInvalidResponse());
         }
-        final displayName = data.initiatorName ?? 'Meeting';
-        final hasVideo = data.callType != IsometrikLiveCallType.audioCall;
+        final displayName = _resolvePeerName(
+          primary: data,
+          fallback: 'Meeting',
+        );
+        final hasVideo = _resolveCallType(primary: data) !=
+            IsometrikLiveCallType.audioCall;
         await _startOutgoingCallSkippingSimulatorFailures(
           native,
           callee: IsometrikCallDisplayUser(
@@ -563,9 +762,9 @@ class IsometrikCallSdk {
     meetingRouterContext.callDetailsMeetingId = meeting.meetingId;
     meetingRouterContext.nativeCallActive = true;
     await native.reportIncomingCall(
-      callerName: meeting.initiatorName ?? 'Unknown',
+      callerName: _resolvePeerName(primary: meeting),
       callId: meeting.meetingId ?? '',
-      hasVideo: meeting.callType == IsometrikLiveCallType.videoCall,
+      hasVideo: meeting.callType != IsometrikLiveCallType.audioCall,
       metadata: meeting.toJson(),
     );
     final cfg = session.configuration;
@@ -722,13 +921,20 @@ class IsometrikCallSdk {
       final r = await acceptCall(meetingId: meetingId);
       switch (r) {
         case IsometrikSuccess(:final data):
+          final resolvedMeetingId =
+              data.meetingId ?? pending?.meetingId ?? meetingId;
+          final resolvedRtcToken = data.rtcToken ?? pending?.rtcToken;
+          final resolvedCallType = _resolveCallType(
+            primary: data,
+            secondary: pending,
+          );
           final controller = IsometrikCallController(
             sdk: this,
-            meetingId: data.meetingId ?? meetingId,
-            peerName: pending?.initiatorName ?? data.initiatorName ?? 'Unknown',
+            meetingId: resolvedMeetingId,
+            peerName: _resolvePeerName(primary: data, secondary: pending),
             isOutgoing: false,
-            hasVideo: data.callType != IsometrikLiveCallType.audioCall,
-            rtcToken: data.rtcToken,
+            hasVideo: resolvedCallType != IsometrikLiveCallType.audioCall,
+            rtcToken: resolvedRtcToken,
             peerImageUrl: pending?.initiatorImageUrl,
             initialStatus: IsometrikCallStatus.connecting,
             preflightPermissionsOnInit: _triggerPermissionsOnIncomingAccept,

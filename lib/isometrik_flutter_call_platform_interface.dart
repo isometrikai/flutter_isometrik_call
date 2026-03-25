@@ -99,6 +99,16 @@ abstract class IsometrikFlutterCallPlatform extends PlatformInterface {
     );
   }
 
+  /// Android runtime permissions request (camera / microphone).
+  Future<Map<String, dynamic>> requestRuntimePermissions({
+    required bool requestMicrophone,
+    required bool requestCamera,
+  }) {
+    throw UnimplementedError(
+      'requestRuntimePermissions() has not been implemented.',
+    );
+  }
+
   Stream<Map<String, dynamic>> events() {
     throw UnimplementedError('events() has not been implemented.');
   }

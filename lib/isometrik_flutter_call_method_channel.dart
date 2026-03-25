@@ -111,6 +111,21 @@ class MethodChannelIsometrikFlutterCall extends IsometrikFlutterCallPlatform {
   }
 
   @override
+  Future<Map<String, dynamic>> requestRuntimePermissions({
+    required bool requestMicrophone,
+    required bool requestCamera,
+  }) async {
+    final response = await methodChannel.invokeMethod<Map<dynamic, dynamic>>(
+      'requestRuntimePermissions',
+      <String, dynamic>{
+        'requestMicrophone': requestMicrophone,
+        'requestCamera': requestCamera,
+      },
+    );
+    return Map<String, dynamic>.from(response ?? <String, dynamic>{});
+  }
+
+  @override
   Stream<Map<String, dynamic>> events() {
     return eventChannel.receiveBroadcastStream().map((dynamic event) {
       return Map<String, dynamic>.from(event as Map);

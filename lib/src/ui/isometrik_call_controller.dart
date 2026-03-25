@@ -1,7 +1,7 @@
 import 'dart:async';
-import 'dart:ui';
 
 import 'package:flutter/foundation.dart';
+import 'package:flutter/services.dart';
 import 'package:livekit_client/livekit_client.dart';
 import 'package:permission_handler/permission_handler.dart';
 
@@ -90,6 +90,7 @@ class IsometrikCallController extends ChangeNotifier {
   String? _permissionsMessage;
   String? get permissionsMessage => _permissionsMessage;
   bool _permissionPreflightTriggered = false;
+  Future<bool>? _permissionRequestInFlight;
 
   /// True when required runtime permissions are missing for the active call mode.
   bool get hasMissingPermissions => _permissionsMessage != null;
@@ -153,6 +154,7 @@ class IsometrikCallController extends ChangeNotifier {
   /// Current preferred camera side for local publishing.
   bool _isFrontCamera = true;
   bool get isFrontCamera => _isFrontCamera;
+  bool _cameraFlipInProgress = false;
 
   /// True when at least one local/remote video track is currently published.
   ///
@@ -294,6 +296,7 @@ class IsometrikCallController extends ChangeNotifier {
       try {
         await _liveKit.connect(url: url, token: token);
         await _syncLocalMediaState();
+        await _syncLocalAudioState();
       } catch (e) {
         debugPrint('IsometrikCallController: LiveKit connect error: $e');
       }
@@ -311,12 +314,42 @@ class IsometrikCallController extends ChangeNotifier {
   /// Audio call requires microphone; video call requires both microphone + camera.
   /// Returns `true` only when all required permissions are granted.
   Future<bool> _ensureRequiredPermissions() async {
+    final inFlight = _permissionRequestInFlight;
+    if (inFlight != null) {
+      return inFlight;
+    }
+    final request = _requestRequiredPermissionsInternal();
+    _permissionRequestInFlight = request;
+    try {
+      return await request;
+    } finally {
+      if (identical(_permissionRequestInFlight, request)) {
+        _permissionRequestInFlight = null;
+      }
+    }
+  }
+
+  Future<bool> _requestRequiredPermissionsInternal() async {
     final required = <Permission>[
       Permission.microphone,
       if (hasVideo) Permission.camera,
     ];
 
-    final statuses = await required.request();
+    Map<Permission, PermissionStatus> statuses;
+    try {
+      statuses = await required.request();
+    } on PlatformException catch (e) {
+      // iOS permission_handler rejects concurrent requests with this error.
+      // Wait briefly and read current permission state instead of failing call setup.
+      if (e.code == 'ERROR_ALREADY_REQUESTING_PERMISSIONS') {
+        await Future<void>.delayed(const Duration(milliseconds: 300));
+        statuses = <Permission, PermissionStatus>{
+          for (final permission in required) permission: await permission.status,
+        };
+      } else {
+        rethrow;
+      }
+    }
     final missing = <String>[];
     var needsSettings = false;
 
@@ -394,6 +427,14 @@ class IsometrikCallController extends ChangeNotifier {
     try {
       await sdk.native.setMute(_muted);
     } catch (_) {}
+    final local = _liveKit.currentRoom?.localParticipant;
+    if (local != null) {
+      try {
+        await local.setMicrophoneEnabled(!_muted);
+      } catch (e) {
+        debugPrint('IsometrikCallController: toggleMute error: $e');
+      }
+    }
     notifyListeners();
   }
 
@@ -403,6 +444,14 @@ class IsometrikCallController extends ChangeNotifier {
     try {
       await sdk.native.setSpeaker(_speaker);
     } catch (_) {}
+    final room = _liveKit.currentRoom;
+    if (room != null) {
+      try {
+        await room.setSpeakerOn(_speaker);
+      } catch (e) {
+        debugPrint('IsometrikCallController: toggleSpeaker error: $e');
+      }
+    }
     notifyListeners();
   }
 
@@ -437,27 +486,43 @@ class IsometrikCallController extends ChangeNotifier {
 
   /// Switches active camera between front and back.
   Future<void> flipCamera() async {
-    if (!hasVideo || !_localVideoEnabled || _status == IsometrikCallStatus.ended) {
+    if (!hasVideo ||
+        !_localVideoEnabled ||
+        _status == IsometrikCallStatus.ended ||
+        _cameraFlipInProgress) {
       return;
     }
 
-    _isFrontCamera = !_isFrontCamera;
-    notifyListeners();
-
+    _cameraFlipInProgress = true;
     final local = _liveKit.currentRoom?.localParticipant;
-    if (local == null) return;
+    if (local == null) {
+      _cameraFlipInProgress = false;
+      return;
+    }
+    final targetIsFront = !_isFrontCamera;
+    final targetPosition =
+        targetIsFront ? CameraPosition.front : CameraPosition.back;
     try {
-      await local.setCameraEnabled(
-        true,
-        cameraCaptureOptions: CameraCaptureOptions(
-          cameraPosition:
-              _isFrontCamera ? CameraPosition.front : CameraPosition.back,
-        ),
-      );
+      // Prefer native track camera switch for a seamless in-call flip.
+      final localTrack = _firstLocalVideoTrack(local);
+      if (localTrack != null) {
+        await localTrack.setCameraPosition(targetPosition);
+      } else {
+        // Fallback: restart camera publication with target side.
+        await local.setCameraEnabled(
+          true,
+          cameraCaptureOptions: CameraCaptureOptions(
+            cameraPosition: targetPosition,
+          ),
+        );
+      }
+      _isFrontCamera = targetIsFront;
     } catch (e) {
       debugPrint('IsometrikCallController: flipCamera error: $e');
+    } finally {
+      _cameraFlipInProgress = false;
+      notifyListeners();
     }
-    notifyListeners();
   }
 
   /// End the call: disconnect media, end CallKit, leave meeting.
@@ -479,9 +544,14 @@ class IsometrikCallController extends ChangeNotifier {
     if (_publishBusy || meetingId.isEmpty) return;
     _publishBusy = true;
     notifyListeners();
-    await sdk.publishVideoUpgradeRequest(meetingId: meetingId);
-    _publishBusy = false;
-    notifyListeners();
+    try {
+      await sdk.publishVideoUpgradeRequest(meetingId: meetingId);
+    } catch (e) {
+      debugPrint('IsometrikCallController: requestVideoUpgrade error: $e');
+    } finally {
+      _publishBusy = false;
+      notifyListeners();
+    }
   }
 
   /// Accept or decline an incoming video upgrade request.
@@ -490,23 +560,24 @@ class IsometrikCallController extends ChangeNotifier {
     _publishBusy = true;
     notifyListeners();
 
-    if (accept) {
-      final granted = await _ensureRequiredPermissionsForVideoUpgrade();
-      if (!granted) {
-        _publishBusy = false;
-        notifyListeners();
-        return;
+    try {
+      if (accept) {
+        final granted = await _ensureRequiredPermissionsForVideoUpgrade();
+        if (!granted) return;
+        await sdk.publishVideoUpgradeAccepted(meetingId: meetingId);
+        hasVideo = true;
+        _localVideoEnabled = true;
+        await _syncLocalMediaState();
+      } else {
+        await sdk.publishVideoUpgradeRejected(meetingId: meetingId);
       }
-      await sdk.publishVideoUpgradeAccepted(meetingId: meetingId);
-      hasVideo = true;
-      _localVideoEnabled = true;
-      await _syncLocalMediaState();
-    } else {
-      await sdk.publishVideoUpgradeRejected(meetingId: meetingId);
+      _videoUpgradeRequest = null;
+    } catch (e) {
+      debugPrint('IsometrikCallController: respondToVideoUpgrade error: $e');
+    } finally {
+      _publishBusy = false;
+      notifyListeners();
     }
-    _videoUpgradeRequest = null;
-    _publishBusy = false;
-    notifyListeners();
   }
 
   /// Video upgrade is only allowed when both microphone and camera are granted.
@@ -535,6 +606,27 @@ class IsometrikCallController extends ChangeNotifier {
     } catch (e) {
       debugPrint('IsometrikCallController: syncLocalMediaState error: $e');
     }
+  }
+
+  Future<void> _syncLocalAudioState() async {
+    if (_status == IsometrikCallStatus.ended) return;
+    final room = _liveKit.currentRoom;
+    final local = room?.localParticipant;
+    if (local == null || room == null) return;
+    try {
+      await local.setMicrophoneEnabled(!_muted);
+      await room.setSpeakerOn(_speaker);
+    } catch (e) {
+      debugPrint('IsometrikCallController: syncLocalAudioState error: $e');
+    }
+  }
+
+  LocalVideoTrack? _firstLocalVideoTrack(LocalParticipant participant) {
+    for (final publication in participant.videoTrackPublications) {
+      final track = publication.track;
+      if (track is LocalVideoTrack) return track;
+    }
+    return null;
   }
 
   /// Handle incoming call acceptance — call accept API, then connect media.

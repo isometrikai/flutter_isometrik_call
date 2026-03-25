@@ -33,7 +33,9 @@ class IsometrikNativeCallEvent {
 
 /// Native-only bridge: CallKit / PushKit / audio route (mirrors `ISMCallManager` surface).
 class IsometrikFlutterCall {
-  const IsometrikFlutterCall();
+  IsometrikFlutterCall();
+
+  Stream<IsometrikNativeCallEvent>? _sharedEvents;
 
   Future<void> initialize(IsometrikCallConfiguration configuration) {
     return IsometrikFlutterCallPlatform.instance.initialize(
@@ -117,9 +119,21 @@ class IsometrikFlutterCall {
     return IsometrikFlutterCallPlatform.instance.cancelScheduledHangup();
   }
 
-  Stream<IsometrikNativeCallEvent> get events {
-    return IsometrikFlutterCallPlatform.instance.events().map(
-      IsometrikNativeCallEvent.fromMap,
+  Future<Map<String, dynamic>> requestRuntimePermissions({
+    required bool requestMicrophone,
+    required bool requestCamera,
+  }) {
+    return IsometrikFlutterCallPlatform.instance.requestRuntimePermissions(
+      requestMicrophone: requestMicrophone,
+      requestCamera: requestCamera,
     );
+  }
+
+  Stream<IsometrikNativeCallEvent> get events {
+    return _sharedEvents ??=
+        IsometrikFlutterCallPlatform.instance
+            .events()
+            .map(IsometrikNativeCallEvent.fromMap)
+            .asBroadcastStream();
   }
 }

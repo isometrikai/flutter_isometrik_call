@@ -1,3 +1,9 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
   package="io.isometrik.isometrik_flutter_call">
+  <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+  <application>
+    <receiver
+      android:name=".IsometrikIncomingActionReceiver"
+      android:exported="false" />
+  </application>
 </manifest>
