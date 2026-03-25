@@ -154,6 +154,7 @@ class IsometrikCallController extends ChangeNotifier {
   /// Current preferred camera side for local publishing.
   bool _isFrontCamera = true;
   bool get isFrontCamera => _isFrontCamera;
+  bool _cameraFlipInProgress = false;
 
   /// True when at least one local/remote video track is currently published.
   ///
@@ -485,27 +486,43 @@ class IsometrikCallController extends ChangeNotifier {
 
   /// Switches active camera between front and back.
   Future<void> flipCamera() async {
-    if (!hasVideo || !_localVideoEnabled || _status == IsometrikCallStatus.ended) {
+    if (!hasVideo ||
+        !_localVideoEnabled ||
+        _status == IsometrikCallStatus.ended ||
+        _cameraFlipInProgress) {
       return;
     }
 
-    _isFrontCamera = !_isFrontCamera;
-    notifyListeners();
-
+    _cameraFlipInProgress = true;
     final local = _liveKit.currentRoom?.localParticipant;
-    if (local == null) return;
+    if (local == null) {
+      _cameraFlipInProgress = false;
+      return;
+    }
+    final targetIsFront = !_isFrontCamera;
+    final targetPosition =
+        targetIsFront ? CameraPosition.front : CameraPosition.back;
     try {
-      await local.setCameraEnabled(
-        true,
-        cameraCaptureOptions: CameraCaptureOptions(
-          cameraPosition:
-              _isFrontCamera ? CameraPosition.front : CameraPosition.back,
-        ),
-      );
+      // Prefer native track camera switch for a seamless in-call flip.
+      final localTrack = _firstLocalVideoTrack(local);
+      if (localTrack != null) {
+        await localTrack.setCameraPosition(targetPosition);
+      } else {
+        // Fallback: restart camera publication with target side.
+        await local.setCameraEnabled(
+          true,
+          cameraCaptureOptions: CameraCaptureOptions(
+            cameraPosition: targetPosition,
+          ),
+        );
+      }
+      _isFrontCamera = targetIsFront;
     } catch (e) {
       debugPrint('IsometrikCallController: flipCamera error: $e');
+    } finally {
+      _cameraFlipInProgress = false;
+      notifyListeners();
     }
-    notifyListeners();
   }
 
   /// End the call: disconnect media, end CallKit, leave meeting.
@@ -602,6 +619,14 @@ class IsometrikCallController extends ChangeNotifier {
     } catch (e) {
       debugPrint('IsometrikCallController: syncLocalAudioState error: $e');
     }
+  }
+
+  LocalVideoTrack? _firstLocalVideoTrack(LocalParticipant participant) {
+    for (final publication in participant.videoTrackPublications) {
+      final track = publication.track;
+      if (track is LocalVideoTrack) return track;
+    }
+    return null;
   }
 
   /// Handle incoming call acceptance — call accept API, then connect media.
