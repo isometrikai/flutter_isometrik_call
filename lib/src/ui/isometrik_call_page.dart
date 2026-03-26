@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
 import 'package:livekit_client/livekit_client.dart';
@@ -159,6 +160,11 @@ class _IsometrikCallPageState extends State<IsometrikCallPage> {
   bool _endedPopScheduled = false;
   bool _allowNextPop = false;
   bool _showLocalInFullscreen = false;
+  Offset? _pipOffset;
+  bool _isDraggingPip = false;
+
+  static const Size _pipSize = Size(122, 178);
+  static const EdgeInsets _pipEdgePadding = EdgeInsets.fromLTRB(18, 96, 18, 156);
 
   IsometrikCallController get _ctrl => widget.controller;
   IsometrikCallPageConfig get _cfg => widget.config;
@@ -222,6 +228,55 @@ class _IsometrikCallPageState extends State<IsometrikCallPage> {
     setState(() {
       _showLocalInFullscreen = !_showLocalInFullscreen;
     });
+  }
+
+  Rect _pipBounds(Size canvasSize) {
+    final left = _pipEdgePadding.left;
+    final top = _pipEdgePadding.top;
+    final right = math.max(
+      left,
+      canvasSize.width - _pipSize.width - _pipEdgePadding.right,
+    );
+    final bottom = math.max(
+      top,
+      canvasSize.height - _pipSize.height - _pipEdgePadding.bottom,
+    );
+    return Rect.fromLTRB(left, top, right, bottom);
+  }
+
+  Offset _defaultPipOffset(Size canvasSize) {
+    final bounds = _pipBounds(canvasSize);
+    return Offset(bounds.right, bounds.bottom);
+  }
+
+  Offset _clampPipOffset(Offset offset, Size canvasSize) {
+    final bounds = _pipBounds(canvasSize);
+    return Offset(
+      offset.dx.clamp(bounds.left, bounds.right).toDouble(),
+      offset.dy.clamp(bounds.top, bounds.bottom).toDouble(),
+    );
+  }
+
+  Offset _snapToNearestCorner(Offset current, Size canvasSize) {
+    final bounds = _pipBounds(canvasSize);
+    final corners = <Offset>[
+      Offset(bounds.left, bounds.top),
+      Offset(bounds.right, bounds.top),
+      Offset(bounds.left, bounds.bottom),
+      Offset(bounds.right, bounds.bottom),
+    ];
+    var nearest = corners.first;
+    var bestDistance = double.infinity;
+    for (final corner in corners) {
+      final dx = current.dx - corner.dx;
+      final dy = current.dy - corner.dy;
+      final dist = dx * dx + dy * dy;
+      if (dist < bestDistance) {
+        bestDistance = dist;
+        nearest = corner;
+      }
+    }
+    return nearest;
   }
 
   Future<bool> _minimizeCallView() async {
@@ -461,47 +516,105 @@ class _IsometrikCallPageState extends State<IsometrikCallPage> {
     final pipTrack = showLocalInFullscreen ? remoteTile?.track : localTrack;
     final pipPlaceholder = showLocalInFullscreen ? 'Waiting for remote video…' : 'Camera off';
 
-    return Stack(
+    return LayoutBuilder(
       key: key,
-      children: <Widget>[
-        Positioned.fill(
-          child: _VideoTile(
-            label: fullScreenLabel,
-            track: fullScreenTrack,
-            placeholder: fullScreenPlaceholder,
-            borderRadius: 0,
-            showLabelPill: false,
-            ignoreVideoGestures: true,
-          ),
-        ),
-        Positioned(
-          right: 18,
-          bottom: 156,
-          width: 122,
-          height: 178,
-          child: GestureDetector(
-            onTap: _swapVideoTiles,
-            child: _VideoTile(
-              label: pipLabel,
-              track: pipTrack,
-              placeholder: pipPlaceholder,
-              borderRadius: 16,
-              showLabelPill: false,
-              ignoreVideoGestures: true,
+      builder: (BuildContext context, BoxConstraints constraints) {
+        final canvasSize = Size(constraints.maxWidth, constraints.maxHeight);
+        final rawPipOffset = _pipOffset ?? _defaultPipOffset(canvasSize);
+        final pipOffset = _clampPipOffset(rawPipOffset, canvasSize);
+        if (_pipOffset == null || pipOffset != rawPipOffset) {
+          WidgetsBinding.instance.addPostFrameCallback((_) {
+            if (!mounted) return;
+            setState(() {
+              _pipOffset = pipOffset;
+            });
+          });
+        }
+
+        return Stack(
+          children: <Widget>[
+            Positioned.fill(
+              child: _VideoTile(
+                label: fullScreenLabel,
+                track: fullScreenTrack,
+                placeholder: fullScreenPlaceholder,
+                borderRadius: 0,
+                showLabelPill: false,
+                ignoreVideoGestures: true,
+              ),
             ),
-          ),
-        ),
-        Positioned(
-          right: 25,
-          top: showLocalInFullscreen ? 86 : null,
-          bottom: showLocalInFullscreen ? null : 278,
-          child: _VideoOverlayActionButton(
-            icon: Icons.cameraswitch_rounded,
-            enabled: canFlipCamera,
-            onTap: () => _runAction(_ctrl.flipCamera, label: 'flip_camera_overlay'),
-          ),
-        ),
-      ],
+            AnimatedPositioned(
+              duration: _isDraggingPip
+                  ? Duration.zero
+                  : const Duration(milliseconds: 180),
+              curve: Curves.easeOutCubic,
+              left: pipOffset.dx,
+              top: pipOffset.dy,
+              width: _pipSize.width,
+              height: _pipSize.height,
+              child: GestureDetector(
+                behavior: HitTestBehavior.opaque,
+                onTap: _swapVideoTiles,
+                onPanStart: (_) {
+                  setState(() {
+                    _isDraggingPip = true;
+                  });
+                },
+                onPanUpdate: (DragUpdateDetails details) {
+                  setState(() {
+                    final current = _pipOffset ?? pipOffset;
+                    _pipOffset = _clampPipOffset(
+                      current + details.delta,
+                      canvasSize,
+                    );
+                  });
+                },
+                onPanEnd: (_) {
+                  setState(() {
+                    _isDraggingPip = false;
+                    final current = _pipOffset ?? pipOffset;
+                    _pipOffset = _snapToNearestCorner(current, canvasSize);
+                  });
+                },
+                child: Stack(
+                  fit: StackFit.expand,
+                  children: <Widget>[
+                    _VideoTile(
+                      label: pipLabel,
+                      track: pipTrack,
+                      placeholder: pipPlaceholder,
+                      borderRadius: 16,
+                      showLabelPill: false,
+                      ignoreVideoGestures: true,
+                    ),
+                    if (!showLocalInFullscreen)
+                      Positioned(
+                        top: 6,
+                        right: 6,
+                        child: _VideoOverlayActionButton(
+                          icon: Icons.cameraswitch_rounded,
+                          enabled: canFlipCamera,
+                          onTap: () =>
+                              _runAction(_ctrl.flipCamera, label: 'flip_camera_overlay'),
+                        ),
+                      ),
+                  ],
+                ),
+              ),
+            ),
+            if (showLocalInFullscreen)
+              Positioned(
+                top: 86,
+                right: 20,
+                child: _VideoOverlayActionButton(
+                  icon: Icons.cameraswitch_rounded,
+                  enabled: canFlipCamera,
+                  onTap: () => _runAction(_ctrl.flipCamera, label: 'flip_camera_overlay'),
+                ),
+              ),
+          ],
+        );
+      },
     );
   }
 
