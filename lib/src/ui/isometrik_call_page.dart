@@ -158,6 +158,7 @@ class IsometrikCallPage extends StatefulWidget {
 class _IsometrikCallPageState extends State<IsometrikCallPage> {
   bool _endedPopScheduled = false;
   bool _allowNextPop = false;
+  bool _showLocalInFullscreen = false;
 
   IsometrikCallController get _ctrl => widget.controller;
   IsometrikCallPageConfig get _cfg => widget.config;
@@ -215,6 +216,12 @@ class _IsometrikCallPageState extends State<IsometrikCallPage> {
     if (_ctrl.status == IsometrikCallStatus.ended) return true;
     final minimized = await _minimizeCallView();
     return !minimized;
+  }
+
+  void _swapVideoTiles() {
+    setState(() {
+      _showLocalInFullscreen = !_showLocalInFullscreen;
+    });
   }
 
   Future<bool> _minimizeCallView() async {
@@ -416,7 +423,7 @@ class _IsometrikCallPageState extends State<IsometrikCallPage> {
     final remoteTiles = <_ParticipantVideoTileData>[
       for (final p in remoteParticipants)
         _ParticipantVideoTileData(
-          label: p.identity,
+          label: p.name.trim().isNotEmpty ? p.name.trim() : p.identity,
           track: _firstVideoTrack(p),
         ),
     ];
@@ -444,17 +451,27 @@ class _IsometrikCallPageState extends State<IsometrikCallPage> {
     final canFlipCamera = _ctrl.status != IsometrikCallStatus.ended &&
         !_ctrl.hasMissingPermissions &&
         _ctrl.isLocalVideoEnabled;
+    final showLocalInFullscreen = _showLocalInFullscreen;
+    final fullScreenLabel =
+        showLocalInFullscreen ? 'You' : (remoteTile?.label ?? _ctrl.peerName);
+    final fullScreenTrack = showLocalInFullscreen ? localTrack : remoteTile?.track;
+    final fullScreenPlaceholder =
+        showLocalInFullscreen ? 'Camera off' : 'Waiting for remote video…';
+    final pipLabel = showLocalInFullscreen ? (remoteTile?.label ?? _ctrl.peerName) : 'You';
+    final pipTrack = showLocalInFullscreen ? remoteTile?.track : localTrack;
+    final pipPlaceholder = showLocalInFullscreen ? 'Waiting for remote video…' : 'Camera off';
 
     return Stack(
       key: key,
       children: <Widget>[
         Positioned.fill(
           child: _VideoTile(
-            label: remoteTile?.label ?? _ctrl.peerName,
-            track: remoteTile?.track,
-            placeholder: 'Waiting for remote video…',
+            label: fullScreenLabel,
+            track: fullScreenTrack,
+            placeholder: fullScreenPlaceholder,
             borderRadius: 0,
             showLabelPill: false,
+            ignoreVideoGestures: true,
           ),
         ),
         Positioned(
@@ -462,17 +479,22 @@ class _IsometrikCallPageState extends State<IsometrikCallPage> {
           bottom: 156,
           width: 122,
           height: 178,
-          child: _VideoTile(
-            label: 'You',
-            track: localTrack,
-            placeholder: 'Camera off',
-            borderRadius: 16,
-            showLabelPill: false,
+          child: GestureDetector(
+            onTap: _swapVideoTiles,
+            child: _VideoTile(
+              label: pipLabel,
+              track: pipTrack,
+              placeholder: pipPlaceholder,
+              borderRadius: 16,
+              showLabelPill: false,
+              ignoreVideoGestures: true,
+            ),
           ),
         ),
         Positioned(
           right: 25,
-          bottom: 278,
+          top: showLocalInFullscreen ? 86 : null,
+          bottom: showLocalInFullscreen ? null : 278,
           child: _VideoOverlayActionButton(
             icon: Icons.cameraswitch_rounded,
             enabled: canFlipCamera,
@@ -488,6 +510,9 @@ class _IsometrikCallPageState extends State<IsometrikCallPage> {
     required List<_ParticipantVideoTileData> remoteTiles,
     required VideoTrack? localTrack,
   }) {
+    final canFlipCamera = _ctrl.status != IsometrikCallStatus.ended &&
+        !_ctrl.hasMissingPermissions &&
+        _ctrl.isLocalVideoEnabled;
     final tiles = <_ParticipantVideoTileData>[
       ...remoteTiles,
       _ParticipantVideoTileData(label: 'You', track: localTrack),
@@ -505,10 +530,36 @@ class _IsometrikCallPageState extends State<IsometrikCallPage> {
         ),
         itemBuilder: (BuildContext context, int index) {
           final tile = tiles[index];
-          return _VideoTile(
-            label: tile.label,
-            track: tile.track,
-            placeholder: 'Video off',
+          final isLocalTile = index == tiles.length - 1;
+          if (!isLocalTile) {
+            return _VideoTile(
+              label: tile.label,
+              track: tile.track,
+              placeholder: 'Video off',
+            );
+          }
+
+          return Stack(
+            fit: StackFit.expand,
+            children: <Widget>[
+              _VideoTile(
+                label: tile.label,
+                track: tile.track,
+                placeholder: 'Video off',
+              ),
+              Positioned(
+                top: 6,
+                right: 6,
+                child: _VideoOverlayActionButton(
+                  icon: Icons.cameraswitch_rounded,
+                  enabled: canFlipCamera,
+                  onTap: () => _runAction(
+                    _ctrl.flipCamera,
+                    label: 'flip_camera_overlay_group',
+                  ),
+                ),
+              ),
+            ],
           );
         },
       ),
@@ -852,6 +903,7 @@ class _VideoTile extends StatelessWidget {
     required this.placeholder,
     this.borderRadius = 14,
     this.showLabelPill = true,
+    this.ignoreVideoGestures = false,
   });
 
   final String label;
@@ -859,6 +911,7 @@ class _VideoTile extends StatelessWidget {
   final String placeholder;
   final double borderRadius;
   final bool showLabelPill;
+  final bool ignoreVideoGestures;
 
   @override
   Widget build(BuildContext context) {
@@ -869,9 +922,14 @@ class _VideoTile extends StatelessWidget {
         children: <Widget>[
           Container(color: Colors.white10),
           if (track != null)
-            VideoTrackRenderer(
-              track!,
-              fit: VideoViewFit.cover,
+            IgnorePointer(
+              // Prevent internal renderer from handling tap gestures
+              // (some flutter_webrtc versions use taps for focus/exposure).
+              ignoring: ignoreVideoGestures,
+              child: VideoTrackRenderer(
+                track!,
+                fit: VideoViewFit.cover,
+              ),
             )
           else
             Center(
@@ -896,7 +954,7 @@ class _VideoTile extends StatelessWidget {
                   label,
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
-                  style: const TextStyle(color: Colors.white, fontSize: 11),
+                  style: const TextStyle(color: Colors.white, fontSize: 12),
                 ),
               ),
             ),
