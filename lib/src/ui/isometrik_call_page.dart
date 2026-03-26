@@ -392,14 +392,14 @@ class _IsometrikCallPageState extends State<IsometrikCallPage> {
                 mainAxisSize: MainAxisSize.min,
                 children: <Widget>[
                   _cfg.avatarBuilder?.call(context, _ctrl) ?? _buildDefaultAvatar(),
-                  if (_cfg.showMeetingIdDebug) ...<Widget>[
-                    const SizedBox(height: 14),
-                    Text(
-                      _ctrl.meetingId,
-                      textAlign: TextAlign.center,
-                      style: const TextStyle(color: Colors.white30, fontSize: 11),
-                    ),
-                  ],
+                  // if (_cfg.showMeetingIdDebug) ...<Widget>[
+                  //   const SizedBox(height: 14),
+                  //   Text(
+                  //     _ctrl.meetingId,
+                  //     textAlign: TextAlign.center,
+                  //     style: const TextStyle(color: Colors.white30, fontSize: 11),
+                  //   ),
+                  // ],
                 ],
               ),
             ),
@@ -1057,11 +1057,11 @@ class _MinimizedCallWindow extends StatelessWidget {
     final localTrack = room == null
         ? null
         : _firstParticipantTrack(room.localParticipant?.videoTrackPublications);
-    final remoteParticipants = room?.remoteParticipants.values.toList() ?? <RemoteParticipant>[];
-    final remote = remoteParticipants.isEmpty ? null : remoteParticipants.first;
-    final remoteTrack = remote == null
-        ? null
-        : _firstParticipantTrack(remote.videoTrackPublications);
+    // final remoteParticipants = room?.remoteParticipants.values.toList() ?? <RemoteParticipant>[];
+    // final remote = remoteParticipants.isEmpty ? null : remoteParticipants.first;
+    // final remoteTrack = remote == null
+    //     ? null
+    //     : _firstParticipantTrack(remote.videoTrackPublications);
 
     return Container(
       width: 170,
@@ -1079,13 +1079,13 @@ class _MinimizedCallWindow extends StatelessWidget {
         child: controller.hasVideo
             ? Stack(
                 children: <Widget>[
-                  Positioned.fill(
-                    child: _VideoTile(
-                      label: remote?.identity ?? controller.peerName,
-                      track: remoteTrack,
-                      placeholder: 'Video off',
-                    ),
-                  ),
+                  // Positioned.fill(
+                  //   child: _VideoTile(
+                  //     label: remote?.identity ?? controller.peerName,
+                  //     track: remoteTrack,
+                  //     placeholder: 'Video off',
+                  //   ),
+                  // ),
                   Positioned(
                     right: 6,
                     bottom: 6,
