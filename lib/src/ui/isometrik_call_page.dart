@@ -478,7 +478,7 @@ class _IsometrikCallPageState extends State<IsometrikCallPage> {
     final remoteTiles = <_ParticipantVideoTileData>[
       for (final p in remoteParticipants)
         _ParticipantVideoTileData(
-          label: p.name.trim().isNotEmpty ? p.name.trim() : p.identity,
+          label: p.identity,
           track: _firstVideoTrack(p),
         ),
     ];
@@ -628,54 +628,130 @@ class _IsometrikCallPageState extends State<IsometrikCallPage> {
         _ctrl.isLocalVideoEnabled;
     final tiles = <_ParticipantVideoTileData>[
       ...remoteTiles,
-      _ParticipantVideoTileData(label: 'You', track: localTrack),
+      _ParticipantVideoTileData(label: '', track: localTrack),
     ];
-    return Padding(
+    return LayoutBuilder(
       key: key,
-      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 10),
-      child: GridView.builder(
-        itemCount: tiles.length,
-        gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
-          crossAxisCount: 2,
-          mainAxisSpacing: 10,
-          crossAxisSpacing: 10,
-          childAspectRatio: 0.72,
-        ),
-        itemBuilder: (BuildContext context, int index) {
+      builder: (BuildContext context, BoxConstraints constraints) {
+        final participantCount = tiles.length;
+        final spacing = 6.0;
+        const tileRadius = 10.0;
+        Widget buildParticipantTile(int index) {
           final tile = tiles[index];
           final isLocalTile = index == tiles.length - 1;
-          if (!isLocalTile) {
-            return _VideoTile(
-              label: tile.label,
-              track: tile.track,
-              placeholder: 'Video off',
-            );
-          }
-
-          return Stack(
-            fit: StackFit.expand,
-            children: <Widget>[
-              _VideoTile(
-                label: tile.label,
-                track: tile.track,
-                placeholder: 'Video off',
-              ),
-              Positioned(
-                top: 6,
-                right: 6,
-                child: _VideoOverlayActionButton(
-                  icon: Icons.cameraswitch_rounded,
-                  enabled: canFlipCamera,
-                  onTap: () => _runAction(
-                    _ctrl.flipCamera,
-                    label: 'flip_camera_overlay_group',
+          return DecoratedBox(
+            decoration: BoxDecoration(
+              color: Colors.black,
+              borderRadius: BorderRadius.circular(tileRadius),
+            ),
+            child: ClipRRect(
+              borderRadius: BorderRadius.circular(tileRadius),
+              child: Stack(
+                fit: StackFit.expand,
+                children: <Widget>[
+                  _VideoTile(
+                    label: tile.label,
+                    track: tile.track,
+                    placeholder: 'Video off',
+                    borderRadius: tileRadius,
+                    // WhatsApp-like group layout: no name pill overlays on tiles.
+                    showLabelPill: false,
                   ),
+                  if (isLocalTile)
+                    Positioned(
+                      top: 6,
+                      right: 6,
+                      child: _VideoOverlayActionButton(
+                        icon: Icons.cameraswitch_rounded,
+                        enabled: canFlipCamera,
+                        onTap: () => _runAction(
+                          _ctrl.flipCamera,
+                          label: 'flip_camera_overlay_group',
+                        ),
+                      ),
+                    ),
+                ],
+              ),
+            ),
+          );
+        }
+
+        if (participantCount == 1) {
+          return buildParticipantTile(0);
+        }
+
+        if (participantCount == 2) {
+          return Column(
+            children: <Widget>[
+              Expanded(child: buildParticipantTile(0)),
+              SizedBox(height: spacing),
+              Expanded(child: buildParticipantTile(1)),
+            ],
+          );
+        }
+
+        if (participantCount == 3) {
+          return Column(
+            children: <Widget>[
+              Expanded(
+                child: Row(
+                  children: <Widget>[
+                    Expanded(child: buildParticipantTile(0)),
+                    SizedBox(width: spacing),
+                    Expanded(child: buildParticipantTile(1)),
+                  ],
+                ),
+              ),
+              SizedBox(height: spacing),
+              Expanded(child: buildParticipantTile(2)),
+            ],
+          );
+        }
+
+        if (participantCount == 4) {
+          return Column(
+            children: <Widget>[
+              Expanded(
+                child: Row(
+                  children: <Widget>[
+                    Expanded(child: buildParticipantTile(0)),
+                    SizedBox(width: spacing),
+                    Expanded(child: buildParticipantTile(1)),
+                  ],
+                ),
+              ),
+              SizedBox(height: spacing),
+              Expanded(
+                child: Row(
+                  children: <Widget>[
+                    Expanded(child: buildParticipantTile(2)),
+                    SizedBox(width: spacing),
+                    Expanded(child: buildParticipantTile(3)),
+                  ],
                 ),
               ),
             ],
           );
-        },
-      ),
+        }
+
+        final width = constraints.maxWidth;
+        final crossAxisCount = switch (participantCount) {
+          <= 9 => 3,
+          _ => math.max(3, (width / 150).floor()),
+        };
+
+        return GridView.builder(
+          itemCount: tiles.length,
+          physics: const BouncingScrollPhysics(),
+          gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
+            crossAxisCount: crossAxisCount,
+            mainAxisSpacing: spacing,
+            crossAxisSpacing: spacing,
+            childAspectRatio: 0.72,
+          ),
+          itemBuilder: (BuildContext context, int index) => buildParticipantTile(index),
+        );
+      },
     );
   }
 
@@ -1046,10 +1122,21 @@ class _VideoTile extends StatelessWidget {
             )
           else
             Center(
-              child: Text(
-                placeholder,
-                style: const TextStyle(color: Colors.white60, fontSize: 12),
-                textAlign: TextAlign.center,
+              child: Container(
+                padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+                decoration: BoxDecoration(
+                  color: Colors.black.withValues(alpha: 0.45),
+                  borderRadius: BorderRadius.circular(16),
+                ),
+                child: Text(
+                  placeholder,
+                  style: const TextStyle(
+                    color: Colors.white70,
+                    fontSize: 12,
+                    fontWeight: FontWeight.w500,
+                  ),
+                  textAlign: TextAlign.center,
+                ),
               ),
             ),
           if (showLabelPill)
