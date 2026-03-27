@@ -237,8 +237,25 @@ class IsometrikCallController extends ChangeNotifier {
         // Remote user published — our turn to connect & publish.
         _connectAndPublish();
       case IsometrikRoutedMeetingEnded():
-      case IsometrikRoutedMemberLeftOrRejected():
+        debugPrint('IsometrikCallController[$meetingId]: meeting ended');
         _setStatus(IsometrikCallStatus.ended);
+      case IsometrikRoutedMemberLeftOrRejected():
+        // Group-call safe behavior:
+        // - joinRequestReject means this local session cannot continue.
+        // - memberLeft should not end everyone; only end when this client left.
+        final action = e.meeting.meetingAction;
+        if (action == IsometrikMeetingAction.joinRequestReject ||
+            _isLocalMemberLeftEvent(e.meeting)) {
+          debugPrint(
+            'IsometrikCallController[$meetingId]: local leave/reject -> end call',
+          );
+          _setStatus(IsometrikCallStatus.ended);
+        } else {
+          debugPrint(
+            'IsometrikCallController[$meetingId]: remote participant left, keeping call active',
+          );
+          notifyListeners();
+        }
       case IsometrikRoutedVideoUpgradeRequest():
         _videoUpgradeRequest = e.meeting;
         notifyListeners();
@@ -254,6 +271,16 @@ class IsometrikCallController extends ChangeNotifier {
       default:
         break;
     }
+  }
+
+  bool _isLocalMemberLeftEvent(IsometrikMeeting meeting) {
+    final localUserId = sdk.meetingRouterContext.currentUserId;
+    if (localUserId == null || localUserId.isEmpty) return false;
+    final actor = meeting.userId ??
+        meeting.senderId ??
+        meeting.createdBy ??
+        meeting.initiatorIdentifier;
+    return actor != null && actor == localUserId;
   }
 
   void _onNativeEvent(IsometrikNativeCallEvent e) {

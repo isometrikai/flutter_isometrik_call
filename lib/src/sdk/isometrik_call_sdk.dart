@@ -878,8 +878,19 @@ class IsometrikCallSdk {
         debugPrint('IsometrikCallSdk: auto-handler — meeting ended ${e.meeting.meetingId}');
         await endNativeCall();
       case IsometrikRoutedMemberLeftOrRejected():
-        debugPrint('IsometrikCallSdk: auto-handler — member left/reject ${e.meeting.meetingId}');
-        await endNativeCall();
+        final action = e.meeting.meetingAction;
+        final shouldEnd = action == IsometrikMeetingAction.joinRequestReject ||
+            _isLocalActorMeetingEvent(e.meeting);
+        if (shouldEnd) {
+          debugPrint(
+            'IsometrikCallSdk: auto-handler — local leave/reject ${e.meeting.meetingId}',
+          );
+          await endNativeCall();
+        } else {
+          debugPrint(
+            'IsometrikCallSdk: auto-handler — remote member left, keep call active ${e.meeting.meetingId}',
+          );
+        }
       case IsometrikRoutedRemotePublishingStarted():
         debugPrint('IsometrikCallSdk: auto-handler — remote publishing, outgoing connected');
         await markOutgoingConnected();
@@ -966,6 +977,16 @@ class IsometrikCallSdk {
       meetingRouterContext.callAnsweredByDeviceId = null;
       _pendingIncomingMeeting = null;
     }
+  }
+
+  bool _isLocalActorMeetingEvent(IsometrikMeeting meeting) {
+    final localUserId = meetingRouterContext.currentUserId;
+    if (localUserId == null || localUserId.isEmpty) return false;
+    final actor = meeting.userId ??
+        meeting.senderId ??
+        meeting.createdBy ??
+        meeting.initiatorIdentifier;
+    return actor != null && actor == localUserId;
   }
 
   // ---------------------------------------------------------------------------

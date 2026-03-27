@@ -164,6 +164,8 @@ class _IsometrikCallPageState extends State<IsometrikCallPage> {
   bool _showLocalInFullscreen = false;
   Offset? _pipOffset;
   bool _isDraggingPip = false;
+  Size? _lastPipCanvasSize;
+  _PipCorner _pipCorner = _PipCorner.bottomRight;
 
   static const Size _pipSize = Size(122, 178);
   static const EdgeInsets _pipEdgePadding = EdgeInsets.fromLTRB(18, 96, 18, 156);
@@ -246,11 +248,6 @@ class _IsometrikCallPageState extends State<IsometrikCallPage> {
     return Rect.fromLTRB(left, top, right, bottom);
   }
 
-  Offset _defaultPipOffset(Size canvasSize) {
-    final bounds = _pipBounds(canvasSize);
-    return Offset(bounds.right, bounds.bottom);
-  }
-
   Offset _clampPipOffset(Offset offset, Size canvasSize) {
     final bounds = _pipBounds(canvasSize);
     return Offset(
@@ -279,6 +276,38 @@ class _IsometrikCallPageState extends State<IsometrikCallPage> {
       }
     }
     return nearest;
+  }
+
+  _PipCorner _cornerForOffset(Offset current, Size canvasSize) {
+    final bounds = _pipBounds(canvasSize);
+    final corners = <(_PipCorner, Offset)>[
+      (_PipCorner.topLeft, Offset(bounds.left, bounds.top)),
+      (_PipCorner.topRight, Offset(bounds.right, bounds.top)),
+      (_PipCorner.bottomLeft, Offset(bounds.left, bounds.bottom)),
+      (_PipCorner.bottomRight, Offset(bounds.right, bounds.bottom)),
+    ];
+    var nearest = corners.first.$1;
+    var bestDistance = double.infinity;
+    for (final corner in corners) {
+      final dx = current.dx - corner.$2.dx;
+      final dy = current.dy - corner.$2.dy;
+      final dist = dx * dx + dy * dy;
+      if (dist < bestDistance) {
+        bestDistance = dist;
+        nearest = corner.$1;
+      }
+    }
+    return nearest;
+  }
+
+  Offset _offsetForCorner(_PipCorner corner, Size canvasSize) {
+    final bounds = _pipBounds(canvasSize);
+    return switch (corner) {
+      _PipCorner.topLeft => Offset(bounds.left, bounds.top),
+      _PipCorner.topRight => Offset(bounds.right, bounds.top),
+      _PipCorner.bottomLeft => Offset(bounds.left, bounds.bottom),
+      _PipCorner.bottomRight => Offset(bounds.right, bounds.bottom),
+    };
   }
 
   Future<bool> _minimizeCallView() async {
@@ -522,13 +551,23 @@ class _IsometrikCallPageState extends State<IsometrikCallPage> {
       key: key,
       builder: (BuildContext context, BoxConstraints constraints) {
         final canvasSize = Size(constraints.maxWidth, constraints.maxHeight);
-        final rawPipOffset = _pipOffset ?? _defaultPipOffset(canvasSize);
+        final lastSize = _lastPipCanvasSize;
+        final shouldReanchorFromCorner = !_isDraggingPip &&
+            lastSize != null &&
+            ((lastSize.width - canvasSize.width).abs() > 0.5 ||
+                (lastSize.height - canvasSize.height).abs() > 0.5);
+        final rawPipOffset = shouldReanchorFromCorner
+            ? _offsetForCorner(_pipCorner, canvasSize)
+            : (_pipOffset ?? _offsetForCorner(_pipCorner, canvasSize));
         final pipOffset = _clampPipOffset(rawPipOffset, canvasSize);
-        if (_pipOffset == null || pipOffset != rawPipOffset) {
+        if (_pipOffset == null ||
+            pipOffset != rawPipOffset ||
+            _lastPipCanvasSize != canvasSize) {
           WidgetsBinding.instance.addPostFrameCallback((_) {
             if (!mounted) return;
             setState(() {
               _pipOffset = pipOffset;
+              _lastPipCanvasSize = canvasSize;
             });
           });
         }
@@ -575,7 +614,9 @@ class _IsometrikCallPageState extends State<IsometrikCallPage> {
                   setState(() {
                     _isDraggingPip = false;
                     final current = _pipOffset ?? pipOffset;
-                    _pipOffset = _snapToNearestCorner(current, canvasSize);
+                    final snapped = _snapToNearestCorner(current, canvasSize);
+                    _pipOffset = snapped;
+                    _pipCorner = _cornerForOffset(snapped, canvasSize);
                   });
                 },
                 child: Stack(
@@ -1080,6 +1121,13 @@ class _ParticipantVideoTileData {
 
   final String label;
   final VideoTrack? track;
+}
+
+enum _PipCorner {
+  topLeft,
+  topRight,
+  bottomLeft,
+  bottomRight,
 }
 
 class _VideoTile extends StatelessWidget {
