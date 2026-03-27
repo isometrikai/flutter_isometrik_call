@@ -226,8 +226,11 @@ class IsometrikCallSdk {
           requestCamera: hasVideo,
         );
         final microphoneGranted = response['microphoneGranted'] == true;
-        final cameraGranted = hasVideo ? response['cameraGranted'] == true : true;
-        final requiresSettingsAction = response['requiresSettingsAction'] == true;
+        final cameraGranted = hasVideo
+            ? response['cameraGranted'] == true
+            : true;
+        final requiresSettingsAction =
+            response['requiresSettingsAction'] == true;
         if (microphoneGranted && cameraGranted) {
           return const IsometrikCallPermissionsResult(
             microphoneGranted: true,
@@ -271,7 +274,9 @@ class IsometrikCallSdk {
       ];
       final statuses = await required.request();
       final mic = statuses[Permission.microphone]?.isGranted ?? false;
-      final cam = hasVideo ? (statuses[Permission.camera]?.isGranted ?? false) : true;
+      final cam = hasVideo
+          ? (statuses[Permission.camera]?.isGranted ?? false)
+          : true;
       final needsSettings = statuses.values.any(
         (s) => s.isPermanentlyDenied || s.isRestricted,
       );
@@ -282,10 +287,7 @@ class IsometrikCallSdk {
           requiresSettingsAction: false,
         );
       }
-      final missing = <String>[
-        if (!mic) 'Microphone',
-        if (!cam) 'Camera',
-      ];
+      final missing = <String>[if (!mic) 'Microphone', if (!cam) 'Camera'];
       final missingText = missing.join(' and ');
       return IsometrikCallPermissionsResult(
         microphoneGranted: mic,
@@ -449,7 +451,8 @@ class IsometrikCallSdk {
   }
 
   /// Register for VoIP pushes (iOS PushKit). No-op on unsupported platforms.
-  Future<void> registerForVoipPushes() => _invokeNativeBridgeIgnoringMissingPlugin(
+  Future<void> registerForVoipPushes() =>
+      _invokeNativeBridgeIgnoringMissingPlugin(
         native.registerForVoipPushes,
         debugLabel: 'registerForVoipPushes',
       );
@@ -567,8 +570,9 @@ class IsometrikCallSdk {
       deviceId: deviceId,
       customType: callType.apiValue,
       audioOnly: callType == IsometrikLiveCallType.audioCall,
-      meetingDescription:
-          meetingDescription.isEmpty ? 'NA' : meetingDescription,
+      meetingDescription: meetingDescription.isEmpty
+          ? 'NA'
+          : meetingDescription,
       conversationId: conversationId,
     );
     final created = await meetings.createMeeting(body: body);
@@ -646,8 +650,8 @@ class IsometrikCallSdk {
           primary: data,
           fallback: 'Meeting',
         );
-        final hasVideo = _resolveCallType(primary: data) !=
-            IsometrikLiveCallType.audioCall;
+        final hasVideo =
+            _resolveCallType(primary: data) != IsometrikLiveCallType.audioCall;
         await _startOutgoingCallSkippingSimulatorFailures(
           native,
           callee: IsometrikCallDisplayUser(
@@ -677,7 +681,10 @@ class IsometrikCallSdk {
     if (deviceId == null) {
       return const IsometrikFailure(IsometrikInvalidResponse());
     }
-    final r = await meetings.acceptCall(meetingId: meetingId, deviceId: deviceId);
+    final r = await meetings.acceptCall(
+      meetingId: meetingId,
+      deviceId: deviceId,
+    );
     switch (r) {
       case IsometrikSuccess():
         // Swift `CXAnswerCallAction`: `callAnsweredByDeviceId = ISMDeviceId`.
@@ -875,11 +882,14 @@ class IsometrikCallSdk {
   Future<void> _handleAutoMqttEvent(IsometrikRoutedMeetingEvent e) async {
     switch (e) {
       case IsometrikRoutedMeetingEnded():
-        debugPrint('IsometrikCallSdk: auto-handler — meeting ended ${e.meeting.meetingId}');
+        debugPrint(
+          'IsometrikCallSdk: auto-handler — meeting ended ${e.meeting.meetingId}',
+        );
         await endNativeCall();
       case IsometrikRoutedMemberLeftOrRejected():
         final action = e.meeting.meetingAction;
-        final shouldEnd = action == IsometrikMeetingAction.joinRequestReject ||
+        final shouldEnd =
+            action == IsometrikMeetingAction.joinRequestReject ||
             _isLocalActorMeetingEvent(e.meeting);
         if (shouldEnd) {
           debugPrint(
@@ -892,10 +902,14 @@ class IsometrikCallSdk {
           );
         }
       case IsometrikRoutedRemotePublishingStarted():
-        debugPrint('IsometrikCallSdk: auto-handler — remote publishing, outgoing connected');
+        debugPrint(
+          'IsometrikCallSdk: auto-handler — remote publishing, outgoing connected',
+        );
         await markOutgoingConnected();
       case IsometrikRoutedLocalSessionSuperseded():
-        debugPrint('IsometrikCallSdk: auto-handler — answered on another device');
+        debugPrint(
+          'IsometrikCallSdk: auto-handler — answered on another device',
+        );
         await endNativeCall();
       case IsometrikRoutedMeetingCreated():
         // When PushKit is disabled, acknowledge MQTT meetingCreated as
@@ -919,70 +933,95 @@ class IsometrikCallSdk {
   }
 
   Future<void> _handleAutoNativeEvent(IsometrikNativeCallEvent e) async {
-    if (e.type == 'callAnswered') {
-      // User accepted via CallKit — call accept API and show call page.
-      final pending = _pendingIncomingMeeting;
-      _pendingIncomingMeeting = null;
+    if (e.type == 'incomingVoipPush') {
+      final meeting = _meetingFromIncomingVoipNativeEvent(e);
+      if (meeting != null) {
+        debugPrint(
+          'IsometrikCallSdk: auto-handler — incoming VoIP push for meeting ${meeting.meetingId}',
+        );
+        await reportIncomingCallFromMeeting(meeting);
+      } else if (e.type == 'callAnswered') {
+        // User accepted via CallKit — call accept API and show call page.
+        final pending = _pendingIncomingMeeting;
+        _pendingIncomingMeeting = null;
 
-      final meetingId = pending?.meetingId ??
-          (e.payload['meetingId'] as String?) ??
-          meetingRouterContext.callDetailsMeetingId;
-      if (meetingId == null) return;
+        final meetingId =
+            pending?.meetingId ??
+            (e.payload['meetingId'] as String?) ??
+            meetingRouterContext.callDetailsMeetingId;
+        if (meetingId == null) return;
 
-      final r = await acceptCall(meetingId: meetingId);
-      switch (r) {
-        case IsometrikSuccess(:final data):
-          final resolvedMeetingId =
-              data.meetingId ?? pending?.meetingId ?? meetingId;
-          final resolvedRtcToken = data.rtcToken ?? pending?.rtcToken;
-          final resolvedCallType = _resolveCallType(
-            primary: data,
-            secondary: pending,
-          );
-          final controller = IsometrikCallController(
-            sdk: this,
-            meetingId: resolvedMeetingId,
-            peerName: _resolvePeerName(primary: data, secondary: pending),
-            isOutgoing: false,
-            hasVideo: resolvedCallType != IsometrikLiveCallType.audioCall,
-            rtcToken: resolvedRtcToken,
-            peerImageUrl: pending?.initiatorImageUrl,
-            initialStatus: IsometrikCallStatus.connecting,
-            preflightPermissionsOnInit: _triggerPermissionsOnIncomingAccept,
-          );
-          _onShowCallPage?.call(controller);
-        case IsometrikFailure(:final error):
-          debugPrint('IsometrikCallSdk: auto-handler — accept failed: $error');
-          await endNativeCall();
-      }
-    } else if (e.type == 'callEnded') {
-      // CallKit ended — if the call was never accepted, reject via API.
-      final meetingId = meetingRouterContext.callDetailsMeetingId;
-      if (meetingId != null) {
-        final wasAnswered = meetingRouterContext.callAnsweredByDeviceId != null;
-        final wasOutgoing = meetingRouterContext.outgoingCallPending;
-        if (wasAnswered || wasOutgoing) {
-          try {
-            await meetings.leaveMeeting(meetingId: meetingId);
-          } catch (_) {}
-        } else {
-          try {
-            await rejectCall(meetingId: meetingId);
-          } catch (_) {}
+        final r = await acceptCall(meetingId: meetingId);
+        switch (r) {
+          case IsometrikSuccess(:final data):
+            final resolvedMeetingId =
+                data.meetingId ?? pending?.meetingId ?? meetingId;
+            final resolvedRtcToken = data.rtcToken ?? pending?.rtcToken;
+            final resolvedCallType = _resolveCallType(
+              primary: data,
+              secondary: pending,
+            );
+            final controller = IsometrikCallController(
+              sdk: this,
+              meetingId: resolvedMeetingId,
+              peerName: _resolvePeerName(primary: data, secondary: pending),
+              isOutgoing: false,
+              hasVideo: resolvedCallType != IsometrikLiveCallType.audioCall,
+              rtcToken: resolvedRtcToken,
+              peerImageUrl: pending?.initiatorImageUrl,
+              initialStatus: IsometrikCallStatus.connecting,
+              preflightPermissionsOnInit: _triggerPermissionsOnIncomingAccept,
+            );
+            _onShowCallPage?.call(controller);
+          case IsometrikFailure(:final error):
+            debugPrint(
+              'IsometrikCallSdk: auto-handler — accept failed: $error',
+            );
+            await endNativeCall();
         }
+      } else if (e.type == 'callEnded') {
+        // CallKit ended — if the call was never accepted, reject via API.
+        final meetingId = meetingRouterContext.callDetailsMeetingId;
+        if (meetingId != null) {
+          final wasAnswered =
+              meetingRouterContext.callAnsweredByDeviceId != null;
+          final wasOutgoing = meetingRouterContext.outgoingCallPending;
+          if (wasAnswered || wasOutgoing) {
+            try {
+              await meetings.leaveMeeting(meetingId: meetingId);
+            } catch (_) {}
+          } else {
+            try {
+              await rejectCall(meetingId: meetingId);
+            } catch (_) {}
+          }
+        }
+        meetingRouterContext.nativeCallActive = false;
+        meetingRouterContext.callDetailsMeetingId = null;
+        meetingRouterContext.outgoingCallPending = false;
+        meetingRouterContext.callAnsweredByDeviceId = null;
+        _pendingIncomingMeeting = null;
       }
-      meetingRouterContext.nativeCallActive = false;
-      meetingRouterContext.callDetailsMeetingId = null;
-      meetingRouterContext.outgoingCallPending = false;
-      meetingRouterContext.callAnsweredByDeviceId = null;
-      _pendingIncomingMeeting = null;
     }
+  }
+
+  IsometrikMeeting? _meetingFromIncomingVoipNativeEvent(
+    IsometrikNativeCallEvent e,
+  ) {
+    final rawPayload = e.payload['payload'];
+    if (rawPayload is Map) {
+      return IsometrikCallSdk.meetingFromVoipPayload(
+        Map<String, dynamic>.from(rawPayload),
+      );
+    }
+    return IsometrikCallSdk.meetingFromVoipPayload(e.payload);
   }
 
   bool _isLocalActorMeetingEvent(IsometrikMeeting meeting) {
     final localUserId = meetingRouterContext.currentUserId;
     if (localUserId == null || localUserId.isEmpty) return false;
-    final actor = meeting.userId ??
+    final actor =
+        meeting.userId ??
         meeting.senderId ??
         meeting.createdBy ??
         meeting.initiatorIdentifier;

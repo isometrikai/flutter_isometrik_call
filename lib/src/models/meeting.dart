@@ -43,7 +43,7 @@ class IsometrikMeeting {
   });
 
   factory IsometrikMeeting.fromJson(Map<String, dynamic> json) {
-    final membersRaw = json['members'] as List<dynamic>?;
+    final membersRaw = json['members'];
     final dynamic rawRtcToken =
         json['rtcToken'] ?? json['token'] ?? json['roomToken'];
     final dynamic rawMeetingId =
@@ -56,22 +56,42 @@ class IsometrikMeeting {
       String v => v.toLowerCase() == 'true' || v == '1',
       _ => null,
     };
-    final initiatorName = (json['initiatorName'] ??
-            json['initiatorUserName'] ??
-            json['createdByName'] ??
-            json['callerName']) as String?;
-    final initiatorIdentifier = (json['initiatorIdentifier'] ??
-            json['initiatorId'] ??
-            json['callerId']) as String?;
+    final initiatorName =
+        (json['initiatorName'] ??
+                json['initiatorUserName'] ??
+                json['createdByName'] ??
+                json['callerName'])
+            as String?;
+    final initiatorIdentifier =
+        (json['initiatorIdentifier'] ?? json['initiatorId'] ?? json['callerId'])
+            as String?;
     return IsometrikMeeting(
       rtcToken: rawRtcToken is String ? rawRtcToken : null,
       uid: json['uid'] as int?,
       action: json['action'] as String?,
       createdBy: json['createdBy'] as String?,
       userId: json['userId'] as String?,
-      members: membersRaw
-          ?.map((e) => IsometrikCallMember.fromJson(e as Map<String, dynamic>))
-          .toList(),
+
+      ///parsing failure and due to this model breaks
+      // members: membersRaw
+      //     ?.map((e) => IsometrikCallMember.fromJson(e as Map<String, dynamic>))
+      //     .toList(),
+      members: (membersRaw is List)
+          ? membersRaw
+                .map((e) {
+                  if (e is Map<String, dynamic>) {
+                    return e;
+                  } else if (e is Map) {
+                    return Map<String, dynamic>.from(
+                      e.map((key, value) => MapEntry(key.toString(), value)),
+                    );
+                  }
+                  return null;
+                })
+                .whereType<Map<String, dynamic>>() // safety filter
+                .map(IsometrikCallMember.fromJson)
+                .toList()
+          : null,
       meetingImageUrl: json['meetingImageUrl'] as String?,
       meetingId: rawMeetingId is String ? rawMeetingId : null,
       meetingDescription: json['meetingDescription'] as String?,
@@ -117,9 +137,10 @@ class IsometrikMeeting {
     }
     final normalized = raw.toLowerCase().replaceAll(RegExp(r'[^a-z0-9]'), '');
     for (final type in IsometrikLiveCallType.values) {
-      final candidate = type.apiValue
-          .toLowerCase()
-          .replaceAll(RegExp(r'[^a-z0-9]'), '');
+      final candidate = type.apiValue.toLowerCase().replaceAll(
+        RegExp(r'[^a-z0-9]'),
+        '',
+      );
       if (candidate == normalized) {
         return type;
       }
