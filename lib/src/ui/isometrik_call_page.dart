@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
@@ -6,6 +7,8 @@ import 'package:livekit_client/livekit_client.dart';
 
 import '../models/models.dart';
 import 'isometrik_call_controller.dart';
+
+const Size _kMinimizedWindowSize = Size(124, 176);
 
 /// Configuration for customising the SDK's default [IsometrikCallPage].
 ///
@@ -99,7 +102,6 @@ class IsometrikCallPage extends StatefulWidget {
     bool animateFromMinimized = false,
     Offset? minimizedOffset,
   }) {
-    const minimizedSize = Size(170, 220);
     return Navigator.of(context).push<void>(
       PageRouteBuilder<void>(
         opaque: false,
@@ -117,8 +119,8 @@ class IsometrikCallPage extends StatefulWidget {
           final pipRect = Rect.fromLTWH(
             pipOffset.dx,
             pipOffset.dy,
-            minimizedSize.width,
-            minimizedSize.height,
+            _kMinimizedWindowSize.width,
+            _kMinimizedWindowSize.height,
           );
 
           final curved = CurvedAnimation(
@@ -1191,7 +1193,7 @@ class _IsometrikMinimizedCallOverlay {
             final constrained = _constrainOffset(
               pos,
               mediaSize,
-              const Size(170, 220),
+              _kMinimizedWindowSize,
             );
             return Positioned(
               left: constrained.dx,
@@ -1202,10 +1204,20 @@ class _IsometrikMinimizedCallOverlay {
                   final next = _constrainOffset(
                     offset.value + details.delta,
                     mediaSize,
-                    const Size(170, 220),
+                    _kMinimizedWindowSize,
                   );
                   controller.setMinimizedWindowOffset(next);
                   offset.value = next;
+                },
+                onPanEnd: (_) {
+                  if (!isEntryActive) return;
+                  final snapped = _snapToNearestSide(
+                    offset.value,
+                    mediaSize,
+                    _kMinimizedWindowSize,
+                  );
+                  controller.setMinimizedWindowOffset(snapped);
+                  offset.value = snapped;
                 },
                 onTap: () {
                   if (_restoringMeetingIds.contains(controller.meetingId)) return;
@@ -1276,6 +1288,16 @@ class _IsometrikMinimizedCallOverlay {
     final dy = value.dy.clamp(40.0, (canvas.height - box.height - 8).clamp(40.0, canvas.height));
     return Offset(dx.toDouble(), dy.toDouble());
   }
+
+  static Offset _snapToNearestSide(Offset value, Size canvas, Size box) {
+    final constrained = _constrainOffset(value, canvas, box);
+    const left = 8.0;
+    final right = (canvas.width - box.width - 8).clamp(8.0, canvas.width).toDouble();
+    final leftDistance = (constrained.dx - left).abs();
+    final rightDistance = (right - constrained.dx).abs();
+    final dx = leftDistance <= rightDistance ? left : right;
+    return Offset(dx, constrained.dy);
+  }
 }
 
 class _OverlayHandle {
@@ -1315,71 +1337,230 @@ class _MinimizedCallWindow extends StatelessWidget {
     final localTrack = room == null
         ? null
         : _firstParticipantTrack(room.localParticipant?.videoTrackPublications);
-    // final remoteParticipants = room?.remoteParticipants.values.toList() ?? <RemoteParticipant>[];
-    // final remote = remoteParticipants.isEmpty ? null : remoteParticipants.first;
-    // final remoteTrack = remote == null
-    //     ? null
-    //     : _firstParticipantTrack(remote.videoTrackPublications);
+    final selfInitial = _resolveSelfInitial(room?.localParticipant);
+    final remoteParticipants = room?.remoteParticipants.values.toList() ?? <RemoteParticipant>[];
+    final primaryRemoteTrack = remoteParticipants.isEmpty
+        ? null
+        : _firstParticipantTrack(remoteParticipants.first.videoTrackPublications);
+    final remoteNames = <String>[
+      for (var i = 0; i < remoteParticipants.length; i++)
+        _displayNameForParticipant(
+          remoteParticipants[i],
+          fallbackIndex: i + 1,
+        ),
+    ];
+    final remoteCount = remoteNames.length;
+    final isOneToOneMini = remoteCount <= 1;
 
     return Container(
-      width: 170,
-      height: 220,
+      width: _kMinimizedWindowSize.width,
+      height: _kMinimizedWindowSize.height,
       decoration: BoxDecoration(
-        color: Colors.black.withValues(alpha: 0.88),
-        borderRadius: BorderRadius.circular(14),
-        border: Border.all(color: Colors.white24),
+        color: const Color(0xFF0B0E13),
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: Colors.white.withValues(alpha: 0.08)),
         boxShadow: const <BoxShadow>[
-          BoxShadow(color: Colors.black45, blurRadius: 10, offset: Offset(0, 4)),
+          BoxShadow(color: Colors.black54, blurRadius: 14, offset: Offset(0, 6)),
         ],
       ),
       child: ClipRRect(
-        borderRadius: BorderRadius.circular(14),
-        child: controller.hasVideo
-            ? Stack(
-                children: <Widget>[
-                  // Positioned.fill(
-                  //   child: _VideoTile(
-                  //     label: remote?.identity ?? controller.peerName,
-                  //     track: remoteTrack,
-                  //     placeholder: 'Video off',
-                  //   ),
-                  // ),
-                  Positioned(
-                    right: 6,
-                    bottom: 6,
-                    width: 54,
-                    height: 84,
-                    child: _VideoTile(
-                      label: 'You',
-                      track: localTrack,
-                      placeholder: '',
-                    ),
-                  ),
-                ],
-              )
-            : Padding(
-                padding: const EdgeInsets.all(12),
-                child: Column(
-                  mainAxisAlignment: MainAxisAlignment.center,
-                  children: <Widget>[
-                    const Icon(Icons.call, color: Colors.white70, size: 28),
-                    const SizedBox(height: 8),
-                    Text(
-                      controller.peerName,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: const TextStyle(color: Colors.white, fontSize: 15),
-                    ),
-                    const SizedBox(height: 4),
-                    Text(
-                      controller.statusText,
-                      style: const TextStyle(color: Colors.white60, fontSize: 12),
-                    ),
-                  ],
-                ),
+        borderRadius: BorderRadius.circular(16),
+        child: Padding(
+          padding: isOneToOneMini ? EdgeInsets.zero : const EdgeInsets.all(6),
+          child: switch (remoteCount) {
+            0 || 1 => _buildOneToOneLayout(
+                remoteName: remoteCount == 0 ? controller.peerName : remoteNames.first,
+                remoteTrack: primaryRemoteTrack,
+                localTrack: localTrack,
+                selfInitial: selfInitial,
               ),
+            _ => _buildGridRemoteLayout(
+                remoteNames,
+                localTrack: localTrack,
+                selfInitial: selfInitial,
+              ),
+          },
+        ),
       ),
     );
+  }
+
+  /// One-to-one minimized view: full remote feed + small self camera overlay.
+  Widget _buildOneToOneLayout({
+    required String remoteName,
+    required VideoTrack? remoteTrack,
+    required VideoTrack? localTrack,
+    required String selfInitial,
+  }) {
+    return Stack(
+      children: <Widget>[
+        Positioned.fill(
+          child: ClipRRect(
+            borderRadius: BorderRadius.circular(16),
+            child: remoteTrack != null
+                ? VideoTrackRenderer(
+                    remoteTrack,
+                    fit: VideoViewFit.cover,
+                  )
+                : _MiniProfileTile(
+                    name: remoteName,
+                    emphasize: true,
+                  ),
+          ),
+        ),
+        Positioned(
+          right: 6,
+          bottom: 6,
+          child: _MiniSelfPreview(
+            localTrack: localTrack,
+            selfInitial: selfInitial,
+          ),
+        ),
+        Positioned(
+          left: 6,
+          bottom: 6,
+          child: Text(
+            controller.statusText,
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: const TextStyle(
+              color: Colors.white70,
+              fontSize: 10,
+              fontWeight: FontWeight.w500,
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+
+  /// More than two remotes: compact 2-column grid + small self camera preview.
+  Widget _buildGridRemoteLayout(
+    List<String> remoteNames, {
+    required VideoTrack? localTrack,
+    required String selfInitial,
+  }) {
+    final totalRemote = remoteNames.length;
+    final visibleCount = math.min(totalRemote, 4);
+    final hiddenCount = math.max(0, totalRemote - visibleCount);
+
+    return Stack(
+      children: <Widget>[
+        Positioned.fill(
+          child: Padding(
+            padding: const EdgeInsets.only(right: 2, bottom: 2),
+            child: GridView.builder(
+              physics: const NeverScrollableScrollPhysics(),
+              itemCount: visibleCount,
+              gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+                crossAxisCount: 2,
+                crossAxisSpacing: 4,
+                mainAxisSpacing: 4,
+                childAspectRatio: 1.06,
+              ),
+              itemBuilder: (BuildContext context, int index) {
+                final isOverflowCell = index == visibleCount - 1 && hiddenCount > 0;
+                return _MiniProfileTile(
+                  name: remoteNames[index],
+                  compact: true,
+                  extraCount: isOverflowCell ? hiddenCount : 0,
+                );
+              },
+            ),
+          ),
+        ),
+        Positioned(
+          right: 4,
+          bottom: 4,
+          child: _MiniSelfPreview(
+            localTrack: localTrack,
+            selfInitial: selfInitial,
+          ),
+        ),
+      ],
+    );
+  }
+
+  static String _displayNameForParticipant(
+    RemoteParticipant participant, {
+    required int fallbackIndex,
+  }) {
+    final dynamic p = participant;
+    final rawName = (p.name as String?)?.trim() ?? '';
+    final rawMetadata = (p.metadata as String?)?.trim() ?? '';
+    final rawIdentity = participant.identity.trim();
+
+    final candidates = <String>[
+      _normalizedHumanToken(rawName),
+      _nameFromMetadata(rawMetadata),
+      _normalizedHumanToken(rawIdentity),
+    ];
+    for (final candidate in candidates) {
+      if (candidate.isNotEmpty && !_looksLikeId(candidate)) {
+        return candidate;
+      }
+    }
+    return 'User $fallbackIndex';
+  }
+
+  static String _nameFromMetadata(String metadataRaw) {
+    if (metadataRaw.isEmpty) return '';
+    try {
+      final decoded = jsonDecode(metadataRaw);
+      if (decoded is Map<String, dynamic>) {
+        const preferredKeys = <String>[
+          'name',
+          'userName',
+          'username',
+          'displayName',
+          'memberName',
+        ];
+        for (final key in preferredKeys) {
+          final value = (decoded[key] as String?)?.trim() ?? '';
+          final normalized = _normalizedHumanToken(value);
+          if (normalized.isNotEmpty && !_looksLikeId(normalized)) {
+            return normalized;
+          }
+        }
+      }
+    } catch (_) {
+      // Ignore malformed participant metadata.
+    }
+    return '';
+  }
+
+  static String _normalizedHumanToken(String raw) {
+    var value = raw.trim();
+    if (value.isEmpty) return '';
+
+    if (value.contains('@')) {
+      value = value.split('@').first.trim();
+    }
+
+    final parts = value
+        .split(RegExp(r'[|,:;/\\]'))
+        .map((e) => e.trim())
+        .where((e) => e.isNotEmpty)
+        .toList();
+    for (final part in parts) {
+      if (!_looksLikeId(part)) return part;
+    }
+    return value;
+  }
+
+  static bool _looksLikeId(String value) {
+    final v = value.trim();
+    if (v.isEmpty) return true;
+    final uuidPattern = RegExp(
+      r'^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$',
+      caseSensitive: false,
+    );
+    if (uuidPattern.hasMatch(v)) return true;
+    final longIdPattern = RegExp(r'^[a-z0-9_-]{12,}$', caseSensitive: false);
+    if (longIdPattern.hasMatch(v)) return true;
+    final digitsOnlyPattern = RegExp(r'^\d{8,}$');
+    if (digitsOnlyPattern.hasMatch(v)) return true;
+    return false;
   }
 
   static VideoTrack? _firstParticipantTrack(
@@ -1391,6 +1572,191 @@ class _MinimizedCallWindow extends StatelessWidget {
       if (track is VideoTrack) return track;
     }
     return null;
+  }
+
+  static String _resolveSelfInitial(LocalParticipant? participant) {
+    if (participant == null) return 'U';
+    final dynamic p = participant;
+    final rawName = (p.name as String?)?.trim() ?? '';
+    final rawMetadata = (p.metadata as String?)?.trim() ?? '';
+    final rawIdentity = participant.identity.trim();
+    final candidates = <String>[
+      _normalizedHumanToken(rawName),
+      _nameFromMetadata(rawMetadata),
+      _normalizedHumanToken(rawIdentity),
+    ];
+    for (final candidate in candidates) {
+      if (candidate.isNotEmpty && !_looksLikeId(candidate)) {
+        return _MiniProfileTile._initials(candidate);
+      }
+    }
+    return 'U';
+  }
+}
+
+class _MiniProfileTile extends StatelessWidget {
+  const _MiniProfileTile({
+    required this.name,
+    this.emphasize = false,
+    this.extraCount = 0,
+    this.compact = false,
+  });
+
+  final String name;
+  final bool emphasize;
+  final int extraCount;
+  final bool compact;
+
+  @override
+  Widget build(BuildContext context) {
+    final bg = _avatarColor(name);
+    final double avatarRadius;
+    final double letterSize;
+    if (compact) {
+      avatarRadius = 10;
+      letterSize = 11;
+    } else if (emphasize) {
+      avatarRadius = 26;
+      letterSize = 18;
+    } else {
+      avatarRadius = 22;
+      letterSize = 15;
+    }
+    final borderRadius = compact ? 8.0 : 10.0;
+
+    return Container(
+      decoration: BoxDecoration(
+        color: const Color(0xFF171C24),
+        borderRadius: BorderRadius.circular(borderRadius),
+        border: Border.all(color: Colors.white10),
+      ),
+      child: Stack(
+        fit: StackFit.expand,
+        children: <Widget>[
+          Center(
+            child: CircleAvatar(
+              radius: avatarRadius,
+              backgroundColor: bg,
+              child: Text(
+                _initials(name),
+                style: TextStyle(
+                  color: Colors.white,
+                  fontSize: letterSize,
+                  fontWeight: FontWeight.w700,
+                ),
+              ),
+            ),
+          ),
+          if (extraCount > 0)
+            compact
+                ? Positioned(
+                    right: 3,
+                    bottom: 3,
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 1),
+                      decoration: BoxDecoration(
+                        color: Colors.black.withValues(alpha: 0.72),
+                        borderRadius: BorderRadius.circular(6),
+                        border: Border.all(color: Colors.white24),
+                      ),
+                      child: Text(
+                        '+$extraCount',
+                        style: const TextStyle(
+                          color: Colors.white,
+                          fontSize: 9,
+                          fontWeight: FontWeight.w700,
+                        ),
+                      ),
+                    ),
+                  )
+                : Positioned.fill(
+                    child: Container(
+                      decoration: BoxDecoration(
+                        color: Colors.black.withValues(alpha: 0.52),
+                        borderRadius: BorderRadius.circular(borderRadius),
+                      ),
+                      alignment: Alignment.center,
+                      child: Text(
+                        '+$extraCount',
+                        style: const TextStyle(
+                          color: Colors.white,
+                          fontWeight: FontWeight.w700,
+                        ),
+                      ),
+                    ),
+                  ),
+        ],
+      ),
+    );
+  }
+
+  static String _initials(String value) {
+    final parts = value.trim().split(RegExp(r'\s+')).where((p) => p.isNotEmpty).toList();
+    if (parts.isEmpty) return '?';
+    return parts.first[0].toUpperCase();
+  }
+
+  static Color _avatarColor(String seed) {
+    final colors = <Color>[
+      const Color(0xFF5E60CE),
+      const Color(0xFF3A86FF),
+      const Color(0xFF2A9D8F),
+      const Color(0xFFE76F51),
+      const Color(0xFFB5179E),
+      const Color(0xFF577590),
+    ];
+    final index = seed.hashCode.abs() % colors.length;
+    return colors[index];
+  }
+}
+
+class _MiniSelfPreview extends StatelessWidget {
+  const _MiniSelfPreview({
+    required this.localTrack,
+    required this.selfInitial,
+  });
+
+  final VideoTrack? localTrack;
+  final String selfInitial;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      width: 34,
+      height: 50,
+      decoration: BoxDecoration(
+        color: const Color(0xFF171C24),
+        borderRadius: BorderRadius.circular(8),
+      ),
+      child: Stack(
+        fit: StackFit.expand,
+        children: <Widget>[
+          if (localTrack != null)
+            VideoTrackRenderer(
+              localTrack!,
+              fit: VideoViewFit.cover,
+            )
+          else
+            Container(
+              color: Colors.white10,
+              child: Center(
+                child: CircleAvatar(
+                  radius: 11,
+                  backgroundColor: Color(0xFFE76F51),
+                  child: Text(
+                    selfInitial,
+                    style: TextStyle(
+                      color: Colors.white,
+                      fontSize: 10,
+                      fontWeight: FontWeight.w700,
+                    ),
+                  ),
+                ),
+              ),
+            ),
+        ],
+      ),
+    );
   }
 }
 
