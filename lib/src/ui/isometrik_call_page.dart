@@ -736,20 +736,15 @@ class _IsometrikCallPageState extends State<IsometrikCallPage> {
           );
         }
 
-        final width = constraints.maxWidth;
-        final crossAxisCount = switch (participantCount) {
-          <= 9 => 3,
-          _ => math.max(3, (width / 150).floor()),
-        };
-
         return GridView.builder(
           itemCount: tiles.length,
           physics: const BouncingScrollPhysics(),
           gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
-            crossAxisCount: crossAxisCount,
+            // Keep WhatsApp-like group grid with two columns for all larger rooms.
+            crossAxisCount: 2,
             mainAxisSpacing: spacing,
             crossAxisSpacing: spacing,
-            childAspectRatio: 0.72,
+            childAspectRatio: 0.82,
           ),
           itemBuilder: (BuildContext context, int index) => buildParticipantTile(index),
         );
