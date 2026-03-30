@@ -43,34 +43,61 @@ class IsometrikMeeting {
   });
 
   factory IsometrikMeeting.fromJson(Map<String, dynamic> json) {
+    // PushKit / MQTT payloads sometimes serialize numbers as strings (or other
+    // JSON types). Keep parsing tolerant so incoming-call routing doesn't
+    // silently fail.
+    String? asString(dynamic v) {
+      if (v == null) return null;
+      if (v is String) return v;
+      return v.toString();
+    }
+
+    int? asInt(dynamic v) {
+      if (v == null) return null;
+      if (v is int) return v;
+      if (v is num) return v.toInt();
+      if (v is String) return int.tryParse(v.trim());
+      return null;
+    }
+
     final membersRaw = json['members'];
-    final dynamic rawRtcToken =
+    final rawRtcToken =
         json['rtcToken'] ?? json['token'] ?? json['roomToken'];
-    final dynamic rawMeetingId =
-        json['meetingId'] ?? json['roomId'] ?? json['meeting_id'];
-    final dynamic rawCustomType = json['customType'] ?? json['callType'];
-    final dynamic rawAudioOnly = json['audioOnly'];
+    // Keep a stable call identifier across PushKit/FCM and socket/MQTT.
+    // Native call actions (CallKit / Android notification) use `callId`,
+    // so when both are present prefer `callId`/`call_id`.
+    final rawMeetingId = json['callId'] ??
+        json['call_id'] ??
+        json['meetingId'] ??
+        json['roomId'] ??
+        json['meeting_id'];
+    final rawCustomType = json['customType'] ?? json['callType'];
+    final rawAudioOnly = json['audioOnly'];
     final parsedAudioOnly = switch (rawAudioOnly) {
       bool v => v,
       int v => v != 0,
       String v => v.toLowerCase() == 'true' || v == '1',
       _ => null,
     };
-    final initiatorName =
-        (json['initiatorName'] ??
-                json['initiatorUserName'] ??
-                json['createdByName'] ??
-                json['callerName'])
-            as String?;
-    final initiatorIdentifier =
-        (json['initiatorIdentifier'] ?? json['initiatorId'] ?? json['callerId'])
-            as String?;
+    final initiatorName = asString(
+      json['initiatorName'] ??
+          json['initiatorUserName'] ??
+          json['createdByName'] ??
+          json['callerName'],
+    );
+    final initiatorIdentifier = asString(
+      json['initiatorIdentifier'] ?? json['initiatorId'] ?? json['callerId'],
+    );
+    final rtcToken = asString(rawRtcToken);
+    final meetingId = asString(rawMeetingId);
+    final customType = asString(rawCustomType);
+
     return IsometrikMeeting(
-      rtcToken: rawRtcToken is String ? rawRtcToken : null,
-      uid: json['uid'] as int?,
-      action: json['action'] as String?,
-      createdBy: json['createdBy'] as String?,
-      userId: json['userId'] as String?,
+      rtcToken: rtcToken,
+      uid: asInt(json['uid']),
+      action: asString(json['action']),
+      createdBy: asString(json['createdBy']),
+      userId: asString(json['userId']),
 
       ///parsing failure and due to this model breaks
       // members: membersRaw
@@ -92,18 +119,18 @@ class IsometrikMeeting {
                 .map(IsometrikCallMember.fromJson)
                 .toList()
           : null,
-      meetingImageUrl: json['meetingImageUrl'] as String?,
-      meetingId: rawMeetingId is String ? rawMeetingId : null,
-      meetingDescription: json['meetingDescription'] as String?,
+      meetingImageUrl: asString(json['meetingImageUrl']),
+      meetingId: meetingId,
+      meetingDescription: asString(json['meetingDescription']),
       initiatorName: initiatorName,
-      initiatorImageUrl: json['initiatorImageUrl'] as String?,
+      initiatorImageUrl: asString(json['initiatorImageUrl']),
       initiatorIdentifier: initiatorIdentifier,
-      senderName: json['senderName'] as String?,
-      senderId: json['senderId'] as String?,
-      body: json['body'] as String?,
-      customType: rawCustomType is String ? rawCustomType : null,
+      senderName: asString(json['senderName']),
+      senderId: asString(json['senderId']),
+      body: asString(json['body']),
+      customType: customType,
       audioOnly: parsedAudioOnly,
-      creationTime: json['creationTime'] as int?,
+      creationTime: asInt(json['creationTime']),
     );
   }
 
