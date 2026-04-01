@@ -203,6 +203,7 @@ class IsometrikCallController extends ChangeNotifier {
 
   StreamSubscription<IsometrikRoutedMeetingEvent>? _mqttSub;
   StreamSubscription<IsometrikNativeCallEvent>? _nativeSub;
+  bool _endedCleanupStarted = false;
 
   // ---------------------------------------------------------------------------
   // Lifecycle
@@ -292,7 +293,24 @@ class IsometrikCallController extends ChangeNotifier {
   void _setStatus(IsometrikCallStatus s) {
     if (_status == s || _status == IsometrikCallStatus.ended) return;
     _status = s;
+    if (s == IsometrikCallStatus.ended) {
+      unawaited(_cleanupAfterEnded());
+    }
     notifyListeners();
+  }
+
+  Future<void> _cleanupAfterEnded() async {
+    if (_endedCleanupStarted) return;
+    _endedCleanupStarted = true;
+    _isMinimized = false;
+    _tick?.cancel();
+    try {
+      await _liveKit.disconnect();
+    } catch (_) {}
+    // Idempotent on native side; safe for remote-ended and local-ended paths.
+    try {
+      await sdk.endNativeCall();
+    } catch (_) {}
   }
 
   /// Connect LiveKit room, call `startPublishing` API, start timer.
@@ -562,7 +580,7 @@ class IsometrikCallController extends ChangeNotifier {
       await sdk.endNativeCall();
     } catch (_) {}
     try {
-      await sdk.meetings.leaveMeeting(meetingId: meetingId);
+      await sdk.leaveMeetingOnce(meetingId);
     } catch (_) {}
   }
 

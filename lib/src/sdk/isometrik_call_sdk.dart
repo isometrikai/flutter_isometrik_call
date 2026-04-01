@@ -172,10 +172,46 @@ class IsometrikCallSdk {
   /// call, ignore subsequent duplicates.
   String? _lastIncomingCallEndedMeetingId;
 
+  /// Meeting ended by server/MQTT; when native `callEnded` follows this
+  /// signal we must skip leave/reject API to avoid 400 "already ended".
+  String? _lastServerEndedMeetingId;
+
+  /// Snapshot of previous active call when a waiting incoming call is shown.
+  bool _hasCallWaitingSnapshot = false;
+  String? _callWaitingPreviousMeetingId;
+  String? _callWaitingPreviousUiMeetingId;
+  String? _callWaitingPreviousAnsweredDeviceId;
+  String? _waitingCallAcceptInProgressMeetingId;
+  DateTime? _waitingCallAcceptStartedAt;
+
+  /// Best-effort guard for caller-side loopback pushes/MQTT that can arrive
+  /// before outgoing state is fully propagated.
+  String? _lastLocalOutgoingMeetingId;
+  DateTime? _lastLocalOutgoingAt;
+
+  /// Idempotency guards for terminal REST actions so UI end + native end event
+  /// cannot issue duplicate leave/reject requests for the same meeting.
+  final Set<String> _leaveInFlightMeetingIds = <String>{};
+  final Set<String> _rejectInFlightMeetingIds = <String>{};
+
   /// Diagnostic: whether an incoming call UI is currently shown.
   bool get isIncomingCallShown => _isIncomingCallShown;
 
   IsometrikCallConfiguration? get configuration => session.configuration;
+
+  void _markLocalOutgoingMeeting(String meetingId) {
+    _lastLocalOutgoingMeetingId = meetingId;
+    _lastLocalOutgoingAt = DateTime.now();
+  }
+
+  bool _isLikelyLocalOutgoingLoopback(String meetingId) {
+    final lastMid = _lastLocalOutgoingMeetingId;
+    final at = _lastLocalOutgoingAt;
+    if (lastMid == null || at == null) return false;
+    if (lastMid != meetingId) return false;
+    // Outgoing loopback events typically arrive right after call creation.
+    return DateTime.now().difference(at) <= const Duration(seconds: 25);
+  }
 
   String _firstNonEmpty(List<String?> values, {String fallback = ''}) {
     for (final value in values) {
@@ -538,6 +574,12 @@ class IsometrikCallSdk {
         if (rtc == null || mid == null) {
           return const IsometrikFailure(IsometrikInvalidResponse());
         }
+        // Set outgoing context before native call start to avoid races where
+        // incoming loopback events arrive while state is still unset.
+        _markLocalOutgoingMeeting(mid);
+        meetingRouterContext.callDetailsMeetingId = mid;
+        meetingRouterContext.outgoingCallPending = true;
+        meetingRouterContext.nativeCallActive = true;
         await _startOutgoingCallSkippingSimulatorFailures(
           native,
           callee: displayUser,
@@ -551,9 +593,6 @@ class IsometrikCallSdk {
         await native.scheduleHangup(
           seconds: cfg.callHangupTimeOnNoAnswerSeconds,
         );
-        meetingRouterContext.callDetailsMeetingId = mid;
-        meetingRouterContext.outgoingCallPending = true;
-        meetingRouterContext.nativeCallActive = true;
         return IsometrikSuccess(data);
     }
   }
@@ -606,6 +645,10 @@ class IsometrikCallSdk {
         if (rtc == null || mid == null) {
           return const IsometrikFailure(IsometrikInvalidResponse());
         }
+        _markLocalOutgoingMeeting(mid);
+        meetingRouterContext.callDetailsMeetingId = mid;
+        meetingRouterContext.outgoingCallPending = true;
+        meetingRouterContext.nativeCallActive = true;
         final firstMember = data.members?.isNotEmpty == true
             ? data.members!.first
             : null;
@@ -624,9 +667,6 @@ class IsometrikCallSdk {
         await native.scheduleHangup(
           seconds: cfg.callHangupTimeOnNoAnswerSeconds,
         );
-        meetingRouterContext.callDetailsMeetingId = mid;
-        meetingRouterContext.outgoingCallPending = true;
-        meetingRouterContext.nativeCallActive = true;
         return IsometrikSuccess(data);
     }
   }
@@ -727,6 +767,32 @@ class IsometrikCallSdk {
     return meetings.rejectCall(meetingId: meetingId, deviceId: deviceId);
   }
 
+  /// Idempotent wrapper for `leaveMeeting` to avoid duplicate terminal calls.
+  Future<void> leaveMeetingOnce(String meetingId) async {
+    final normalized = meetingId.trim();
+    if (normalized.isEmpty) return;
+    if (_leaveInFlightMeetingIds.contains(normalized)) return;
+    _leaveInFlightMeetingIds.add(normalized);
+    try {
+      await meetings.leaveMeeting(meetingId: normalized);
+    } finally {
+      _leaveInFlightMeetingIds.remove(normalized);
+    }
+  }
+
+  /// Idempotent wrapper for `rejectCall` to avoid duplicate terminal calls.
+  Future<void> rejectCallOnce(String meetingId) async {
+    final normalized = meetingId.trim();
+    if (normalized.isEmpty) return;
+    if (_rejectInFlightMeetingIds.contains(normalized)) return;
+    _rejectInFlightMeetingIds.add(normalized);
+    try {
+      await rejectCall(meetingId: normalized);
+    } finally {
+      _rejectInFlightMeetingIds.remove(normalized);
+    }
+  }
+
   /// Mirrors `startPublishing`.
   Future<IsometrikResult<IsometrikMeeting>> startPublishing({
     required String meetingId,
@@ -795,18 +861,66 @@ class IsometrikCallSdk {
       return;
     }
 
-    // If a native call is already active (incoming accepted or outgoing in
-    // progress), do not show another incoming UI. This also prevents pending
-    // overwrite when duplicate triggers arrive mid-call.
+    if (_isLikelyLocalOutgoingLoopback(mid)) {
+      debugPrint(
+        'IsometrikCallSdk: ignoring likely local outgoing loopback for mid=$mid',
+      );
+      return;
+    }
+
+    // Ignore self-originated incoming payloads (can happen when push/socket
+    // fan-out includes local actor). Without this, caller side may show
+    // CallKit "End & Accept" for its own outgoing call.
+    final localUserId = meetingRouterContext.currentUserId?.trim();
+    final meetingActor = (meeting.createdBy ??
+            meeting.userId ??
+            meeting.initiatorIdentifier ??
+            meeting.senderId)
+        ?.trim();
+    if (localUserId != null &&
+        localUserId.isNotEmpty &&
+        meetingActor != null &&
+        meetingActor.isNotEmpty &&
+        meetingActor == localUserId) {
+      debugPrint(
+        'IsometrikCallSdk: ignoring self-originated incoming for mid=$mid actor=$meetingActor',
+      );
+      return;
+    }
+
+    // If another call is already active and this is a different meeting, keep
+    // a snapshot so we can support call waiting:
+    // - accept new -> leave previous call
+    // - decline new -> continue previous call.
     final activeMid = meetingRouterContext.callDetailsMeetingId?.trim();
+    // During outgoing dialing/connecting phase, ignore incoming only when it
+    // is for the same meeting id (loopback). This prevents caller-side
+    // CallKit "End & Accept" while still allowing true call-waiting for a
+    // different meeting.
+    if (meetingRouterContext.outgoingCallPending &&
+        activeMid != null &&
+        activeMid == mid) {
+      debugPrint(
+        'IsometrikCallSdk: ignoring incoming loopback while outgoing pending '
+        '(mid=$mid)',
+      );
+      return;
+    }
+
+    // Ignore duplicate incoming for the same already-active meeting.
+    if (meetingRouterContext.nativeCallActive &&
+        activeMid != null &&
+        activeMid == mid) {
+      debugPrint(
+        'IsometrikCallSdk: ignoring duplicate incoming for active mid=$mid',
+      );
+      return;
+    }
+
     if (meetingRouterContext.nativeCallActive &&
         activeMid != null &&
         activeMid != mid) {
-      debugPrint(
-        'IsometrikCallSdk: ignoring incoming call UI for mid=$mid '
-        '(native call already active for $activeMid)',
-      );
-      return;
+      _captureCallWaitingSnapshotIfNeeded(activeMid);
     }
 
     // Enforce single incoming UI across duplicates ( PushKit + MQTT meetingCreated).
@@ -858,7 +972,10 @@ class IsometrikCallSdk {
           messageBody: IsometrikPublishMessage.callRinging.rawValue,
         );
       }
-    } catch (_) {
+    } catch (e) {
+      debugPrint(
+        'IsometrikCallSdk: reportIncomingCallFromMeeting failed mid=$mid error=$e',
+      );
       _reportedIncomingMeetingIds.remove(mid);
       _isIncomingCallShown = false;
       _incomingCallId = null;
@@ -913,6 +1030,14 @@ class IsometrikCallSdk {
     _pendingIncomingMeeting = null;
     _lastIncomingCallAnsweredMeetingId = null;
     _lastIncomingCallEndedMeetingId = null;
+    _lastServerEndedMeetingId = null;
+    _clearCallWaitingSnapshot();
+    _waitingCallAcceptInProgressMeetingId = null;
+    _waitingCallAcceptStartedAt = null;
+    _lastLocalOutgoingMeetingId = null;
+    _lastLocalOutgoingAt = null;
+    _leaveInFlightMeetingIds.clear();
+    _rejectInFlightMeetingIds.clear();
 
     if (clearAllReportedIncomingIds) {
       _reportedIncomingMeetingIds.clear();
@@ -922,6 +1047,41 @@ class IsometrikCallSdk {
     if (normalized != null && normalized.isNotEmpty) {
       _reportedIncomingMeetingIds.remove(normalized);
     }
+  }
+
+  void _captureCallWaitingSnapshotIfNeeded(String previousMeetingId) {
+    if (_hasCallWaitingSnapshot) return;
+    _hasCallWaitingSnapshot = true;
+    _callWaitingPreviousMeetingId = previousMeetingId;
+    _callWaitingPreviousUiMeetingId = meetingRouterContext.uiMeetingId;
+    _callWaitingPreviousAnsweredDeviceId =
+        meetingRouterContext.callAnsweredByDeviceId;
+  }
+
+  void _clearCallWaitingSnapshot() {
+    _hasCallWaitingSnapshot = false;
+    _callWaitingPreviousMeetingId = null;
+    _callWaitingPreviousUiMeetingId = null;
+    _callWaitingPreviousAnsweredDeviceId = null;
+  }
+
+  void _scheduleWaitingAcceptGuardCleanup(String acceptedMeetingId) {
+    unawaited(
+      Future<void>.delayed(const Duration(seconds: 16), () {
+        final waitingMid = _waitingCallAcceptInProgressMeetingId?.trim();
+        final startedAt = _waitingCallAcceptStartedAt;
+        if (waitingMid == null || waitingMid.isEmpty) return;
+        if (waitingMid != acceptedMeetingId) return;
+        if (startedAt == null) return;
+        // Keep protection window for iOS End&Accept races, then always clear
+        // to avoid stale waiting-call state when publish events are filtered.
+        if (DateTime.now().difference(startedAt) >= const Duration(seconds: 12)) {
+          _clearCallWaitingSnapshot();
+          _waitingCallAcceptInProgressMeetingId = null;
+          _waitingCallAcceptStartedAt = null;
+        }
+      }),
+    );
   }
 
   /// Logout: invalidate PushKit token on server, disconnect MQTT, clear session.
@@ -988,11 +1148,44 @@ class IsometrikCallSdk {
   Future<void> _handleAutoMqttEvent(IsometrikRoutedMeetingEvent e) async {
     switch (e) {
       case IsometrikRoutedMeetingEnded():
+        final endedMid = e.meeting.meetingId?.trim();
+        final waitingPreviousMid = _callWaitingPreviousMeetingId?.trim();
+        final waitingAcceptMid = _waitingCallAcceptInProgressMeetingId?.trim();
+        final waitingTransitionActive = waitingPreviousMid != null &&
+            waitingPreviousMid.isNotEmpty &&
+            waitingAcceptMid != null &&
+            waitingAcceptMid.isNotEmpty;
+        if (waitingTransitionActive &&
+            (endedMid == null ||
+                endedMid.isEmpty ||
+                endedMid == waitingPreviousMid)) {
+          // During iOS End&Accept, MQTT for previous call can arrive after new
+          // call is accepted. Ignore ambiguous/previous end signals so they
+          // never tear down the newly accepted call.
+          return;
+        }
         debugPrint(
           'IsometrikCallSdk: auto-handler — meeting ended ${e.meeting.meetingId}',
         );
+        _lastServerEndedMeetingId = e.meeting.meetingId?.trim();
         await endNativeCall();
       case IsometrikRoutedMemberLeftOrRejected():
+        final leftMid = e.meeting.meetingId?.trim();
+        final waitingPreviousMid = _callWaitingPreviousMeetingId?.trim();
+        final waitingAcceptMid = _waitingCallAcceptInProgressMeetingId?.trim();
+        final waitingTransitionActive = waitingPreviousMid != null &&
+            waitingPreviousMid.isNotEmpty &&
+            waitingAcceptMid != null &&
+            waitingAcceptMid.isNotEmpty;
+        if (waitingTransitionActive &&
+            (leftMid == null ||
+                leftMid.isEmpty ||
+                leftMid == waitingPreviousMid)) {
+          // Same guard as meetingEnded: ignore previous-call leave/reject while
+          // waiting-call accept is transitioning, including ambiguous events
+          // that omit a meeting id.
+          return;
+        }
         final action = e.meeting.meetingAction;
         final shouldEnd =
             action == IsometrikMeetingAction.joinRequestReject ||
@@ -1011,6 +1204,17 @@ class IsometrikCallSdk {
         debugPrint(
           'IsometrikCallSdk: auto-handler — remote publishing, outgoing connected',
         );
+        // iOS End&Accept: once media is flowing for the newly accepted call,
+        // we can safely clear waiting-transition guards.
+        final publishingMid = e.meeting.meetingId?.trim();
+        final waitingAcceptMid = _waitingCallAcceptInProgressMeetingId?.trim();
+        if (waitingAcceptMid != null &&
+            waitingAcceptMid.isNotEmpty &&
+            publishingMid == waitingAcceptMid) {
+          _clearCallWaitingSnapshot();
+          _waitingCallAcceptInProgressMeetingId = null;
+          _waitingCallAcceptStartedAt = null;
+        }
         await markOutgoingConnected();
       case IsometrikRoutedLocalSessionSuperseded():
         debugPrint(
@@ -1081,6 +1285,10 @@ class IsometrikCallSdk {
       // Freeze expected incoming call id so duplicate/stale events don't
       // misroute the accept API to the wrong meeting.
       final expectedIncomingId = _incomingCallId;
+      // Incoming UI is no longer "ringing shown" once user has answered.
+      // Keeping this true blocks future waiting-call incoming UI.
+      _isIncomingCallShown = false;
+      _incomingCallId = null;
 
       String? asString(dynamic v) {
         if (v == null) return null;
@@ -1112,6 +1320,10 @@ class IsometrikCallSdk {
       }
 
       _lastIncomingCallAnsweredMeetingId = meetingId;
+      if (_hasCallWaitingSnapshot) {
+        _waitingCallAcceptInProgressMeetingId = meetingId;
+        _waitingCallAcceptStartedAt = DateTime.now();
+      }
 
       // Mark answered immediately to avoid `callEnded` arriving while the
       // REST accept API is still in-flight (race can otherwise trigger a
@@ -1125,7 +1337,24 @@ class IsometrikCallSdk {
       final r = await acceptCall(meetingId: meetingId);
       switch (r) {
         case IsometrikSuccess(:final data):
+          // Call waiting accept: end/leave previous call so new one becomes
+          // the single active session.
+          if (_hasCallWaitingSnapshot) {
+            final previousMid = _callWaitingPreviousMeetingId?.trim();
+            if (previousMid != null &&
+                previousMid.isNotEmpty &&
+                previousMid != meetingId) {
+              try {
+                await leaveMeetingOnce(previousMid);
+              } catch (_) {}
+            }
+          }
+
           final resolvedMeetingId = data.meetingId?.trim() ?? meetingId;
+          // Ensure router context points to the accepted waiting call.
+          meetingRouterContext.callDetailsMeetingId = resolvedMeetingId;
+          meetingRouterContext.nativeCallActive = true;
+          meetingRouterContext.outgoingCallPending = false;
           final resolvedRtcToken = data.rtcToken ?? pending?.rtcToken;
           final resolvedCallType = _resolveCallType(
             primary: data,
@@ -1143,8 +1372,15 @@ class IsometrikCallSdk {
             preflightPermissionsOnInit: _triggerPermissionsOnIncomingAccept,
           );
           _onShowCallPage?.call(controller);
+          // Keep waiting-call transition markers until old-call `callEnded`
+          // is consumed; otherwise a late ambiguous `callEnded` can tear down
+          // the newly accepted call.
+          _waitingCallAcceptInProgressMeetingId = resolvedMeetingId;
+          _scheduleWaitingAcceptGuardCleanup(resolvedMeetingId);
         case IsometrikFailure(:final error):
           debugPrint('IsometrikCallSdk: auto-handler — accept failed: $error');
+          _waitingCallAcceptInProgressMeetingId = null;
+          _waitingCallAcceptStartedAt = null;
           await endNativeCall();
       }
     } else if (e.type == 'callEnded') {
@@ -1160,6 +1396,29 @@ class IsometrikCallSdk {
       // Prefer context, but fall back to payload to avoid race conditions.
       final contextMeetingId = meetingRouterContext.callDetailsMeetingId?.trim();
       final payloadMeetingId = asString(e.payload['callId'])?.trim();
+
+      // iOS "End & Accept" race:
+      // Old-call end can arrive with missing/ambiguous callId while context
+      // already points to the new incoming call. In that case, never treat this
+      // as the new incoming call ending; just end previous snapshot call.
+      final waitingPreviousMid = _callWaitingPreviousMeetingId?.trim();
+      final incomingMid = _incomingCallId?.trim();
+      if (_hasCallWaitingSnapshot &&
+          waitingPreviousMid != null &&
+          waitingPreviousMid.isNotEmpty &&
+          (payloadMeetingId == null || payloadMeetingId.isEmpty) &&
+          incomingMid != null &&
+          incomingMid.isNotEmpty &&
+          contextMeetingId == incomingMid) {
+        try {
+          await leaveMeetingOnce(waitingPreviousMid);
+        } catch (_) {}
+        _clearCallWaitingSnapshot();
+        _waitingCallAcceptInProgressMeetingId = null;
+        _waitingCallAcceptStartedAt = null;
+        return;
+      }
+
       if (contextMeetingId != null &&
           payloadMeetingId != null &&
           payloadMeetingId != contextMeetingId) {
@@ -1171,6 +1430,48 @@ class IsometrikCallSdk {
       }
 
       final normalizedMeetingId = contextMeetingId ?? payloadMeetingId;
+      final waitingAcceptMid = _waitingCallAcceptInProgressMeetingId?.trim();
+      final waitingTransitionActive = _hasCallWaitingSnapshot &&
+          waitingAcceptMid != null &&
+          waitingAcceptMid.isNotEmpty &&
+          waitingPreviousMid != null &&
+          waitingPreviousMid.isNotEmpty;
+      final waitingAcceptAt = _waitingCallAcceptStartedAt;
+      final waitingAcceptWindowActive = waitingAcceptAt != null &&
+          DateTime.now().difference(waitingAcceptAt) <=
+              const Duration(seconds: 12);
+      if (waitingTransitionActive &&
+          normalizedMeetingId == waitingPreviousMid) {
+        // iOS End & Accept emits callEnded for previous call first. Do not
+        // reset runtime state here, otherwise new accepted call setup is lost.
+        try {
+          await leaveMeetingOnce(waitingPreviousMid);
+        } catch (_) {}
+        // Keep transition guards until new call media starts (or timeout
+        // fallback guards below), because iOS can emit another delayed old-call
+        // `callEnded` with missing/ambiguous callId.
+        return;
+      }
+      if (waitingTransitionActive &&
+          waitingAcceptWindowActive &&
+          normalizedMeetingId == waitingAcceptMid &&
+          (payloadMeetingId == null ||
+              payloadMeetingId.isEmpty ||
+              payloadMeetingId == waitingAcceptMid ||
+              payloadMeetingId == waitingPreviousMid)) {
+        // During iOS End&Accept transition, old-call end may arrive without a
+        // reliable callId while context already points to the newly accepted
+        // meeting. Ignore this ambiguous event to avoid ending the new call.
+        return;
+      }
+      final expectedIncomingMid = _incomingCallId?.trim();
+      final isDeclinedWaitingCall = _hasCallWaitingSnapshot &&
+          normalizedMeetingId != null &&
+          expectedIncomingMid != null &&
+          normalizedMeetingId == expectedIncomingMid;
+      final endedByServer = normalizedMeetingId != null &&
+          normalizedMeetingId.isNotEmpty &&
+          _lastServerEndedMeetingId == normalizedMeetingId;
       if (normalizedMeetingId != null && normalizedMeetingId.isNotEmpty) {
         // Idempotency: ignore duplicate end actions for the same call.
         final isDuplicateEnd =
@@ -1179,20 +1480,42 @@ class IsometrikCallSdk {
 
         // Always reset SDK state (even on duplicates) so the next incoming call
         // can be processed cleanly. Only skip REST side-effects for dupes.
-        if (!isDuplicateEnd) {
+        if (!isDuplicateEnd && !endedByServer) {
           final wasAnswered =
               meetingRouterContext.callAnsweredByDeviceId != null;
           final wasOutgoing = meetingRouterContext.outgoingCallPending;
           if (wasAnswered || wasOutgoing) {
             try {
-              await meetings.leaveMeeting(meetingId: normalizedMeetingId);
+              await leaveMeetingOnce(normalizedMeetingId);
             } catch (_) {}
           } else {
             try {
-              await rejectCall(meetingId: normalizedMeetingId);
+              await rejectCallOnce(normalizedMeetingId);
             } catch (_) {}
           }
         }
+      }
+      if (isDeclinedWaitingCall) {
+        final previousMid = _callWaitingPreviousMeetingId?.trim();
+        final previousUiMid = _callWaitingPreviousUiMeetingId?.trim();
+        final previousAnsweredBy = _callWaitingPreviousAnsweredDeviceId;
+
+        _isIncomingCallShown = false;
+        _incomingCallId = null;
+        _pendingIncomingMeeting = null;
+        if (normalizedMeetingId.isNotEmpty) {
+          _reportedIncomingMeetingIds.remove(normalizedMeetingId);
+        }
+
+        // Keep previous ongoing call alive after declining waiting call.
+        meetingRouterContext.nativeCallActive =
+            previousMid != null && previousMid.isNotEmpty;
+        meetingRouterContext.callDetailsMeetingId = previousMid;
+        meetingRouterContext.uiMeetingId = previousUiMid;
+        meetingRouterContext.callAnsweredByDeviceId = previousAnsweredBy;
+        meetingRouterContext.outgoingCallPending = false;
+        _clearCallWaitingSnapshot();
+        return;
       }
       _resetRuntimeCallState(
         meetingId: normalizedMeetingId,
