@@ -33,7 +33,8 @@ class IsometrikMqttService {
     await disconnect();
     _config = configuration;
     _userClientId = userClientId;
-    final fullClientId = '$userClientId$deviceId';
+    // final fullClientId = '$userClientId$deviceId';
+    final fullClientId = '$userClientId{CALL}$deviceId';
     final username = '2${configuration.accountId}${configuration.projectId}';
     final password = '${configuration.licenseKey}${configuration.keysetId}';
 
