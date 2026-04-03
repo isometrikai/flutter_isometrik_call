@@ -1821,7 +1821,18 @@ class _CallControlBar extends StatelessWidget {
         ),
         child: Row(
           mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-          children: items.map((item) => _ControlIconButton(item: item)).toList(),
+          children: items
+              .map(
+                (item) => Expanded(
+                  child: Center(
+                    child: FittedBox(
+                      fit: BoxFit.scaleDown,
+                      child: _ControlIconButton(item: item),
+                    ),
+                  ),
+                ),
+              )
+              .toList(),
         ),
       ),
     );
