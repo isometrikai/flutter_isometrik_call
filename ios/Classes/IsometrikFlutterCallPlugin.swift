@@ -87,7 +87,9 @@ public class IsometrikFlutterCallPlugin: NSObject, FlutterPlugin, FlutterStreamH
         return
       }
       let hasVideo = args["hasVideo"] as? Bool ?? false
-      reportIncomingCall(callerName: callerName, callId: callId, hasVideo: hasVideo, metadata: args["metadata"] as? [String: Any] ?? [:], result: result)
+      let metadata = args["metadata"] as? [String: Any] ?? [:]
+      let displayName = resolvedIncomingDisplayName(baseCallerName: callerName, metadata: metadata)
+      reportIncomingCall(callerName: displayName, callId: callId, hasVideo: hasVideo, metadata: metadata, result: result)
     case "startOutgoingCall":
       let args = call.arguments as? [String: Any] ?? [:]
       guard let calleeName = args["calleeName"] as? String,
@@ -288,6 +290,29 @@ public class IsometrikFlutterCallPlugin: NSObject, FlutterPlugin, FlutterStreamH
       ])
       result(nil)
     }
+  }
+
+  private func resolvedIncomingDisplayName(
+    baseCallerName: String,
+    metadata: [String: Any]
+  ) -> String {
+    let isGroupFlag: Bool = {
+      if let v = metadata["isGroupCall"] as? Bool { return v }
+      if let v = metadata["isGroupCall"] as? Int { return v != 0 }
+      if let v = metadata["isGroupCall"] as? String {
+        let n = v.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        return n == "true" || n == "1"
+      }
+      return false
+    }()
+    let customType = (metadata["customType"] as? String)?
+      .trimmingCharacters(in: .whitespacesAndNewlines)
+      .lowercased() ?? ""
+    let isGroupByType = customType == "groupcall" || customType == "group_call"
+    let isGroupCall = isGroupFlag || isGroupByType
+    if !isGroupCall { return baseCallerName }
+    if baseCallerName.localizedCaseInsensitiveContains("(Group)") { return baseCallerName }
+    return "\(baseCallerName) (Group)"
   }
 
   private func startOutgoingCall(

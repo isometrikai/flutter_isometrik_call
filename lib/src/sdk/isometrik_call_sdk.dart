@@ -272,6 +272,30 @@ class IsometrikCallSdk {
     return fallback;
   }
 
+  bool _isGroupCall({
+    IsometrikMeeting? primary,
+    IsometrikMeeting? secondary,
+  }) {
+    return _resolveCallType(
+          primary: primary,
+          secondary: secondary,
+        ) ==
+        IsometrikLiveCallType.groupCall;
+  }
+
+  String _resolveIncomingCallerName({
+    required IsometrikMeeting meeting,
+  }) {
+    final baseName = _resolvePeerName(primary: meeting, fallback: 'Unknown');
+    if (_isGroupCall(primary: meeting)) {
+      if (baseName.isNotEmpty && baseName != 'Unknown') {
+        return '$baseName (Group)';
+      }
+      return 'Group call';
+    }
+    return baseName;
+  }
+
   Future<IsometrikCallPermissionsResult> ensureCallPermissions({
     required bool hasVideo,
   }) async {
@@ -952,10 +976,13 @@ class IsometrikCallSdk {
     meetingRouterContext.callAnsweredByDeviceId = null;
     try {
       await native.reportIncomingCall(
-        callerName: _resolvePeerName(primary: meeting),
+        callerName: _resolveIncomingCallerName(meeting: meeting),
         callId: mid,
         hasVideo: meeting.callType != IsometrikLiveCallType.audioCall,
-        metadata: meeting.toJson(),
+        metadata: <String, dynamic>{
+          ...meeting.toJson(),
+          'isGroupCall': _isGroupCall(primary: meeting),
+        },
       );
       final cfg = session.configuration;
       if (cfg != null) {
