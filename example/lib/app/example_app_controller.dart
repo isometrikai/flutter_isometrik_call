@@ -36,7 +36,7 @@ class ExampleAppController extends ChangeNotifier {
   static const _kUserToken = 'example_user_token';
   static const _kEmail = 'example_email';
 
-  final IsometrikCallSdk sdk = IsometrikCallSdk();
+  final sdk = IsometrikCallSdk.instance;
 
   /// Last HTTP lines from [IsometrikHttpClient] (request + response, truncated).
   final List<String> apiLogBuffer = <String>[];

@@ -117,7 +117,10 @@ Future<void> _invokeNativeBridgeIgnoringMissingPlugin(
 ///
 /// Use one instance per app (or inject for tests).
 class IsometrikCallSdk {
-  IsometrikCallSdk();
+    IsometrikCallSdk._();
+  static final IsometrikCallSdk _instance = IsometrikCallSdk._();
+  factory IsometrikCallSdk() => _instance;
+  static IsometrikCallSdk get instance => _instance;
 
   final IsometrikSessionState session = IsometrikSessionState();
   final IsometrikPushKitTokenStore pushKitTokenStore =
@@ -272,20 +275,12 @@ class IsometrikCallSdk {
     return fallback;
   }
 
-  bool _isGroupCall({
-    IsometrikMeeting? primary,
-    IsometrikMeeting? secondary,
-  }) {
-    return _resolveCallType(
-          primary: primary,
-          secondary: secondary,
-        ) ==
+  bool _isGroupCall({IsometrikMeeting? primary, IsometrikMeeting? secondary}) {
+    return _resolveCallType(primary: primary, secondary: secondary) ==
         IsometrikLiveCallType.groupCall;
   }
 
-  String _resolveIncomingCallerName({
-    required IsometrikMeeting meeting,
-  }) {
+  String _resolveIncomingCallerName({required IsometrikMeeting meeting}) {
     final baseName = _resolvePeerName(primary: meeting, fallback: 'Unknown');
     if (_isGroupCall(primary: meeting)) {
       if (baseName.isNotEmpty && baseName != 'Unknown') {
@@ -896,11 +891,12 @@ class IsometrikCallSdk {
     // fan-out includes local actor). Without this, caller side may show
     // CallKit "End & Accept" for its own outgoing call.
     final localUserId = meetingRouterContext.currentUserId?.trim();
-    final meetingActor = (meeting.createdBy ??
-            meeting.userId ??
-            meeting.initiatorIdentifier ??
-            meeting.senderId)
-        ?.trim();
+    final meetingActor =
+        (meeting.createdBy ??
+                meeting.userId ??
+                meeting.initiatorIdentifier ??
+                meeting.senderId)
+            ?.trim();
     if (localUserId != null &&
         localUserId.isNotEmpty &&
         meetingActor != null &&
@@ -1102,7 +1098,8 @@ class IsometrikCallSdk {
         if (startedAt == null) return;
         // Keep protection window for iOS End&Accept races, then always clear
         // to avoid stale waiting-call state when publish events are filtered.
-        if (DateTime.now().difference(startedAt) >= const Duration(seconds: 12)) {
+        if (DateTime.now().difference(startedAt) >=
+            const Duration(seconds: 12)) {
           _clearCallWaitingSnapshot();
           _waitingCallAcceptInProgressMeetingId = null;
           _waitingCallAcceptStartedAt = null;
@@ -1178,7 +1175,8 @@ class IsometrikCallSdk {
         final endedMid = e.meeting.meetingId?.trim();
         final waitingPreviousMid = _callWaitingPreviousMeetingId?.trim();
         final waitingAcceptMid = _waitingCallAcceptInProgressMeetingId?.trim();
-        final waitingTransitionActive = waitingPreviousMid != null &&
+        final waitingTransitionActive =
+            waitingPreviousMid != null &&
             waitingPreviousMid.isNotEmpty &&
             waitingAcceptMid != null &&
             waitingAcceptMid.isNotEmpty;
@@ -1200,7 +1198,8 @@ class IsometrikCallSdk {
         final leftMid = e.meeting.meetingId?.trim();
         final waitingPreviousMid = _callWaitingPreviousMeetingId?.trim();
         final waitingAcceptMid = _waitingCallAcceptInProgressMeetingId?.trim();
-        final waitingTransitionActive = waitingPreviousMid != null &&
+        final waitingTransitionActive =
+            waitingPreviousMid != null &&
             waitingPreviousMid.isNotEmpty &&
             waitingAcceptMid != null &&
             waitingAcceptMid.isNotEmpty;
@@ -1277,7 +1276,8 @@ class IsometrikCallSdk {
           return;
         }
 
-        final createdBy = meeting.createdBy ??
+        final createdBy =
+            meeting.createdBy ??
             meeting.userId ??
             meeting.initiatorIdentifier ??
             meeting.senderId;
@@ -1326,7 +1326,8 @@ class IsometrikCallSdk {
       // iOS native sends `callAnswered` payload as:
       //   { "callId": <activeCallId> }
       // so we must read `callId` (not `meetingId`).
-      final meetingId = expectedIncomingId ??
+      final meetingId =
+          expectedIncomingId ??
           asString(e.payload['callId'])?.trim() ??
           pending?.meetingId?.trim() ??
           meetingRouterContext.callDetailsMeetingId?.trim();
@@ -1421,7 +1422,8 @@ class IsometrikCallSdk {
       // iOS native sends `callEnded` as:
       //   { "callId": <activeCallId> }
       // Prefer context, but fall back to payload to avoid race conditions.
-      final contextMeetingId = meetingRouterContext.callDetailsMeetingId?.trim();
+      final contextMeetingId = meetingRouterContext.callDetailsMeetingId
+          ?.trim();
       final payloadMeetingId = asString(e.payload['callId'])?.trim();
 
       // iOS "End & Accept" race:
@@ -1458,13 +1460,15 @@ class IsometrikCallSdk {
 
       final normalizedMeetingId = contextMeetingId ?? payloadMeetingId;
       final waitingAcceptMid = _waitingCallAcceptInProgressMeetingId?.trim();
-      final waitingTransitionActive = _hasCallWaitingSnapshot &&
+      final waitingTransitionActive =
+          _hasCallWaitingSnapshot &&
           waitingAcceptMid != null &&
           waitingAcceptMid.isNotEmpty &&
           waitingPreviousMid != null &&
           waitingPreviousMid.isNotEmpty;
       final waitingAcceptAt = _waitingCallAcceptStartedAt;
-      final waitingAcceptWindowActive = waitingAcceptAt != null &&
+      final waitingAcceptWindowActive =
+          waitingAcceptAt != null &&
           DateTime.now().difference(waitingAcceptAt) <=
               const Duration(seconds: 12);
       if (waitingTransitionActive &&
@@ -1492,11 +1496,13 @@ class IsometrikCallSdk {
         return;
       }
       final expectedIncomingMid = _incomingCallId?.trim();
-      final isDeclinedWaitingCall = _hasCallWaitingSnapshot &&
+      final isDeclinedWaitingCall =
+          _hasCallWaitingSnapshot &&
           normalizedMeetingId != null &&
           expectedIncomingMid != null &&
           normalizedMeetingId == expectedIncomingMid;
-      final endedByServer = normalizedMeetingId != null &&
+      final endedByServer =
+          normalizedMeetingId != null &&
           normalizedMeetingId.isNotEmpty &&
           _lastServerEndedMeetingId == normalizedMeetingId;
       if (normalizedMeetingId != null && normalizedMeetingId.isNotEmpty) {
