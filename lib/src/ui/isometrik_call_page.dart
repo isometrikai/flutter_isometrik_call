@@ -125,7 +125,7 @@ class IsometrikCallPage extends StatefulWidget {
   }) {
     return Navigator.of(context).push<void>(
       PageRouteBuilder<void>(
-        opaque: false,
+        opaque: true,
         transitionDuration: const Duration(milliseconds: 280),
         reverseTransitionDuration: const Duration(milliseconds: 240),
         pageBuilder: (_, __, ___) => IsometrikCallPage(
@@ -387,14 +387,16 @@ class _IsometrikCallPageState extends State<IsometrikCallPage> {
     final isEnded = _ctrl.status == IsometrikCallStatus.ended;
     final permissionBlocked = _ctrl.hasMissingPermissions;
     final showVideoLayout = _ctrl.hasVideo && _ctrl.hasAnyVideoStreaming;
+    final mediaPadding = MediaQuery.paddingOf(context);
+    final topInset = mediaPadding.top;
+    final bottomInset = mediaPadding.bottom;
 
     return WillPopScope(
       onWillPop: _onBackPressed,
       child: Scaffold(
         backgroundColor: _cfg.backgroundColor,
-        body: SafeArea(
-          child: Stack(
-            children: <Widget>[
+        body: Stack(
+          children: <Widget>[
               Positioned.fill(
                 child: AnimatedSwitcher(
                   duration: const Duration(milliseconds: 280),
@@ -432,13 +434,13 @@ class _IsometrikCallPageState extends State<IsometrikCallPage> {
                   ),
                 ),
               Positioned(
-                top: 12,
+                top: topInset + 12,
                 left: 12,
                 right: 12,
                 child: _buildTopSection(showVideoLayout: showVideoLayout),
               ),
               Positioned(
-                top: 14,
+                top: topInset + 14,
                 left: 14,
                 child: _TopOverlayIconButton(
                   icon: Icons.close_fullscreen_rounded,
@@ -473,7 +475,7 @@ class _IsometrikCallPageState extends State<IsometrikCallPage> {
               Positioned(
                 left: 12,
                 right: 12,
-                bottom: 28,
+                bottom: bottomInset + 28,
                 child: _cfg.controlsBuilder?.call(context, _ctrl) ??
                     _buildModernControls(isEnded, permissionBlocked),
               ),
@@ -481,7 +483,7 @@ class _IsometrikCallPageState extends State<IsometrikCallPage> {
                 Positioned(
                   left: 12,
                   right: 12,
-                  bottom: 128,
+                  bottom: bottomInset + 128,
                   child: Center(
                     child: FilledButton.icon(
                       onPressed: () {
@@ -503,8 +505,7 @@ class _IsometrikCallPageState extends State<IsometrikCallPage> {
                     ),
                   ),
                 ),
-            ],
-          ),
+          ],
         ),
       ),
     );
