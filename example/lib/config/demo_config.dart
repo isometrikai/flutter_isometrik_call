@@ -104,7 +104,7 @@ IsometrikCallConfiguration get kDemoIsometrikCallConfiguration =>
       licenseKey: kDemoLicenseKey,
       appSecret: kDemoAppSecret,
       userSecret: kDemoUserSecret,
-      usePushKit: true,
+      usePushKit: false,
       apiBaseUrl: kDemoApiBaseUrl,
       mqttHost: kDemoMqttHost,
       mqttPort: kDemoMqttPort,

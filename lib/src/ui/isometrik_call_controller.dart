@@ -139,6 +139,7 @@ class IsometrikCallController extends ChangeNotifier {
   bool _muted = false;
   bool get isMuted => _muted;
   bool _muteToggleInProgress = false;
+  bool _nativeMuteSyncInProgress = false;
 
   bool _speaker = false;
   bool get isSpeaker => _speaker;
@@ -291,6 +292,29 @@ class IsometrikCallController extends ChangeNotifier {
   void _onNativeEvent(IsometrikNativeCallEvent e) {
     if (e.type == 'callEnded') {
       _setStatus(IsometrikCallStatus.ended);
+      return;
+    }
+    if (e.type == 'muteUpdated') {
+      final dynamic rawMuted = e.payload['isMuted'];
+      if (rawMuted is! bool) return;
+      if (_muted == rawMuted && !_nativeMuteSyncInProgress) return;
+      _muted = rawMuted;
+      notifyListeners();
+      final local = _liveKit.currentRoom?.localParticipant;
+      if (local != null) {
+        _nativeMuteSyncInProgress = true;
+        unawaited(
+          () async {
+            try {
+              await local.setMicrophoneEnabled(!_muted);
+            } catch (err) {
+              debugPrint('IsometrikCallController: native mute sync error: $err');
+            } finally {
+              _nativeMuteSyncInProgress = false;
+            }
+          }(),
+        );
+      }
     }
   }
 
@@ -472,7 +496,7 @@ class IsometrikCallController extends ChangeNotifier {
 
   /// Toggle microphone mute.
   Future<void> toggleMute() async {
-    if (_muteToggleInProgress) return;
+    if (_muteToggleInProgress || _nativeMuteSyncInProgress) return;
     _muteToggleInProgress = true;
     _muted = !_muted;
     notifyListeners();

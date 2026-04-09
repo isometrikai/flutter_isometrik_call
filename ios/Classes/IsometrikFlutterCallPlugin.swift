@@ -388,12 +388,11 @@ public class IsometrikFlutterCallPlugin: NSObject, FlutterPlugin, FlutterStreamH
     }
     let action = CXSetMutedCallAction(call: uuid, muted: isMuted)
     let transaction = CXTransaction(action: action)
-    callController.request(transaction) { [weak self] error in
+    callController.request(transaction) { error in
       if let error {
         result(FlutterError(code: "callkit_error", message: error.localizedDescription, details: nil))
         return
       }
-      self?.sendEvent(type: "muteUpdated", payload: ["isMuted": isMuted, "callId": self?.activeCallId as Any])
       result(nil)
     }
   }
@@ -483,6 +482,15 @@ extension IsometrikFlutterCallPlugin: CXProviderDelegate {
   public func provider(_ provider: CXProvider, perform action: CXStartCallAction) {
     let connectingCallId = callIdForAction(uuid: action.callUUID)
     sendEvent(type: "callConnecting", payload: ["callId": connectingCallId as Any])
+    action.fulfill()
+  }
+
+  public func provider(_ provider: CXProvider, perform action: CXSetMutedCallAction) {
+    let mutedCallId = callIdForAction(uuid: action.callUUID)
+    sendEvent(type: "muteUpdated", payload: [
+      "isMuted": action.isMuted,
+      "callId": mutedCallId as Any,
+    ])
     action.fulfill()
   }
 }
