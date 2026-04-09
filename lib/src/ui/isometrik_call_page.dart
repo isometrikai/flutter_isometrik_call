@@ -122,8 +122,9 @@ class IsometrikCallPage extends StatefulWidget {
     IsometrikCallPageConfig config = const IsometrikCallPageConfig(),
     bool animateFromMinimized = false,
     Offset? minimizedOffset,
+    bool useRootNavigator = true,
   }) {
-    return Navigator.of(context).push<void>(
+    return Navigator.of(context, rootNavigator: useRootNavigator).push<void>(
       PageRouteBuilder<void>(
         opaque: true,
         transitionDuration: const Duration(milliseconds: 280),
