@@ -68,6 +68,8 @@ class IsometrikCallController extends ChangeNotifier {
   final String? peerImageUrl;
   final bool isOutgoing;
   final bool preflightPermissionsOnInit;
+  bool get shouldBlurIncomingCallByDefault =>
+      !isOutgoing && sdk.blurIncomingUi;
 
   /// RTC token for LiveKit — set on creation (outgoing) or after accept API (incoming).
   String? rtcToken;

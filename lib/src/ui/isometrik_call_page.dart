@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:math' as math;
+import 'dart:ui';
 
 import 'package:flutter/material.dart';
 import 'package:livekit_client/livekit_client.dart';
@@ -30,6 +31,10 @@ class IsometrikCallPageConfig {
     this.statusTextStyle,
     this.peerNameTextStyle,
     this.onCallEnded,
+    this.canRevealIncomingBlur,
+    this.unblurButtonText = 'Unblur',
+    this.unblurButtonBackgroundColor,
+    this.unblurButtonForegroundColor,
   });
 
   final Color backgroundColor;
@@ -65,6 +70,22 @@ class IsometrikCallPageConfig {
 
   /// Fires after the call ends (and after auto-pop if enabled).
   final VoidCallback? onCallEnded;
+
+  /// Gate for the in-call blur reveal action.
+  ///
+  /// Return `true` for subscribed/allowed users; return `false` to keep blur.
+  /// If omitted, reveal is allowed.
+  final bool Function(IsometrikCallController ctrl)? canRevealIncomingBlur;
+
+  /// Label for the blur reveal button.
+  final String unblurButtonText;
+
+  /// Optional background color for the unblur button.
+  final Color? unblurButtonBackgroundColor;
+
+  /// Optional foreground color for the unblur button text/icon.
+  final Color? unblurButtonForegroundColor;
+
 }
 
 /// Default in-call screen provided by the SDK.
@@ -166,12 +187,17 @@ class _IsometrikCallPageState extends State<IsometrikCallPage> {
   bool _isDraggingPip = false;
   Size? _lastPipCanvasSize;
   _PipCorner _pipCorner = _PipCorner.bottomRight;
+  bool _incomingBlurRevealed = false;
 
   static const Size _pipSize = Size(122, 178);
   static const EdgeInsets _pipEdgePadding = EdgeInsets.fromLTRB(18, 96, 18, 156);
 
   IsometrikCallController get _ctrl => widget.controller;
   IsometrikCallPageConfig get _cfg => widget.config;
+  bool get _isIncomingBlurEnabled => _ctrl.shouldBlurIncomingCallByDefault;
+  bool get _showIncomingBlur => _isIncomingBlurEnabled && !_incomingBlurRevealed;
+  bool get _canRevealIncomingBlur =>
+      _cfg.canRevealIncomingBlur?.call(_ctrl) ?? true;
 
   void _runAction(Future<void> Function() action, {String? label}) {
     unawaited(
@@ -189,6 +215,14 @@ class _IsometrikCallPageState extends State<IsometrikCallPage> {
     _IsometrikCallViewRegistry.markVisible(_ctrl.meetingId);
     _ctrl.addListener(_onControllerChanged);
     unawaited(_requestPermissionsOnPageOpen());
+  }
+
+   @override
+  void didUpdateWidget(covariant IsometrikCallPage oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.controller.meetingId != widget.controller.meetingId) {
+      _incomingBlurRevealed = false;
+    }
   }
 
   @override
@@ -388,6 +422,15 @@ class _IsometrikCallPageState extends State<IsometrikCallPage> {
                   ),
                 ),
               ),
+              if (_showIncomingBlur && _ctrl.hasVideo)
+                Positioned.fill(
+                  child: IgnorePointer(
+                    child: BackdropFilter(
+                      filter: ImageFilter.blur(sigmaX: 20, sigmaY: 20),
+                      child: Container(color: Colors.black.withValues(alpha: 0.24)),
+                    ),
+                  ),
+                ),
               Positioned(
                 top: 12,
                 left: 12,
@@ -434,6 +477,32 @@ class _IsometrikCallPageState extends State<IsometrikCallPage> {
                 child: _cfg.controlsBuilder?.call(context, _ctrl) ??
                     _buildModernControls(isEnded, permissionBlocked),
               ),
+              if (_showIncomingBlur && _ctrl.hasVideo)
+                Positioned(
+                  left: 12,
+                  right: 12,
+                  bottom: 128,
+                  child: Center(
+                    child: FilledButton.icon(
+                      onPressed: () {
+                        if (!_canRevealIncomingBlur) {
+                          return;
+                        }
+                        setState(() {
+                          _incomingBlurRevealed = true;
+                        });
+                      },
+                      style: FilledButton.styleFrom(
+                        backgroundColor: _cfg.unblurButtonBackgroundColor,
+                        foregroundColor: _cfg.unblurButtonForegroundColor,
+                      ),
+                      icon: const Icon(Icons.visibility_rounded),
+                      label: Text(
+                        _cfg.unblurButtonText,
+                      ),
+                    ),
+                  ),
+                ),
             ],
           ),
         ),

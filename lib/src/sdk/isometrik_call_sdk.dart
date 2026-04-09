@@ -201,6 +201,7 @@ class IsometrikCallSdk {
   bool get isIncomingCallShown => _isIncomingCallShown;
 
   IsometrikCallConfiguration? get configuration => session.configuration;
+  bool get blurIncomingUi => session.configuration?.blurIncomingUi ?? false;
 
   void _markLocalOutgoingMeeting(String meetingId) {
     _lastLocalOutgoingMeetingId = meetingId;

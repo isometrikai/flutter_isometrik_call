@@ -15,6 +15,7 @@ class IsometrikCallConfiguration {
     this.streamingUrl = 'wss://streaming.isometrik.io',
     this.videoCallOption = true,
     this.androidIncomingRingtoneUri,
+    this.blurIncomingUi = false,
   });
 
   final String accountId;
@@ -42,6 +43,8 @@ class IsometrikCallConfiguration {
 
   final bool videoCallOption;
 
+  final bool blurIncomingUi;
+
   /// Optional custom ringtone URI for Android incoming calls.
   ///
   /// Example values:
@@ -67,6 +70,7 @@ class IsometrikCallConfiguration {
       'streamingUrl': streamingUrl,
       'videoCallOption': videoCallOption,
       'androidIncomingRingtoneUri': androidIncomingRingtoneUri,
+      'blurIncomingUi': blurIncomingUi,
     };
   }
 }
