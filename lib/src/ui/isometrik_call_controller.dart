@@ -138,9 +138,11 @@ class IsometrikCallController extends ChangeNotifier {
 
   bool _muted = false;
   bool get isMuted => _muted;
+  bool _muteToggleInProgress = false;
 
   bool _speaker = false;
   bool get isSpeaker => _speaker;
+  bool _speakerToggleInProgress = false;
 
   // ---------------------------------------------------------------------------
   // Video controls
@@ -470,36 +472,59 @@ class IsometrikCallController extends ChangeNotifier {
 
   /// Toggle microphone mute.
   Future<void> toggleMute() async {
+    if (_muteToggleInProgress) return;
+    _muteToggleInProgress = true;
     _muted = !_muted;
-    try {
-      await sdk.native.setMute(_muted);
-    } catch (_) {}
-    final local = _liveKit.currentRoom?.localParticipant;
-    if (local != null) {
-      try {
-        await local.setMicrophoneEnabled(!_muted);
-      } catch (e) {
-        debugPrint('IsometrikCallController: toggleMute error: $e');
-      }
-    }
     notifyListeners();
+    try {
+      final local = _liveKit.currentRoom?.localParticipant;
+      if (local != null) {
+        try {
+          await local.setMicrophoneEnabled(!_muted);
+        } catch (e) {
+          debugPrint('IsometrikCallController: toggleMute error: $e');
+        }
+      } else {
+        // Fallback for pre-connect phase where only native side is active.
+        try {
+          await sdk.native.setMute(_muted);
+        } catch (_) {}
+      }
+    } finally {
+      _muteToggleInProgress = false;
+      notifyListeners();
+    }
+  }
+
+  Future<void> _applySpeakerRoute() async {
+    final room = _liveKit.currentRoom;
+    if (room != null) {
+      try {
+        // Keep a single source of truth for speaker route while media is active.
+        await room.setSpeakerOn(_speaker);
+      } catch (e) {
+        debugPrint('IsometrikCallController: applySpeakerRoute error: $e');
+      }
+      return;
+    }
+    // Fallback before LiveKit connects.
+    try {
+      await sdk.native.setSpeaker(_speaker);
+    } catch (_) {}
   }
 
   /// Toggle speaker / earpiece.
   Future<void> toggleSpeaker() async {
+    if (_speakerToggleInProgress) return;
+    _speakerToggleInProgress = true;
     _speaker = !_speaker;
-    try {
-      await sdk.native.setSpeaker(_speaker);
-    } catch (_) {}
-    final room = _liveKit.currentRoom;
-    if (room != null) {
-      try {
-        await room.setSpeakerOn(_speaker);
-      } catch (e) {
-        debugPrint('IsometrikCallController: toggleSpeaker error: $e');
-      }
-    }
     notifyListeners();
+    try {
+      await _applySpeakerRoute();
+    } finally {
+      _speakerToggleInProgress = false;
+      notifyListeners();
+    }
   }
 
   /// Enable/disable local camera stream without ending the call.
@@ -662,7 +687,7 @@ class IsometrikCallController extends ChangeNotifier {
     if (local == null || room == null) return;
     try {
       await local.setMicrophoneEnabled(!_muted);
-      await room.setSpeakerOn(_speaker);
+      await _applySpeakerRoute();
     } catch (e) {
       debugPrint('IsometrikCallController: syncLocalAudioState error: $e');
     }
