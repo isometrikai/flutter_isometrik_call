@@ -55,15 +55,15 @@ class IsometrikCallPageConfig {
 
   /// Replace the default header row. Return `null` to fall back to default.
   final Widget Function(BuildContext context, IsometrikCallController ctrl)?
-      headerBuilder;
+  headerBuilder;
 
   /// Replace the default avatar circle. Return `null` to fall back to default.
   final Widget Function(BuildContext context, IsometrikCallController ctrl)?
-      avatarBuilder;
+  avatarBuilder;
 
   /// Replace the default control buttons (mute / speaker / end).
   final Widget Function(BuildContext context, IsometrikCallController ctrl)?
-      controlsBuilder;
+  controlsBuilder;
 
   final TextStyle? statusTextStyle;
   final TextStyle? peerNameTextStyle;
@@ -85,7 +85,6 @@ class IsometrikCallPageConfig {
 
   /// Optional foreground color for the unblur button text/icon.
   final Color? unblurButtonForegroundColor;
-
 }
 
 /// Default in-call screen provided by the SDK.
@@ -129,49 +128,59 @@ class IsometrikCallPage extends StatefulWidget {
         opaque: true,
         transitionDuration: const Duration(milliseconds: 280),
         reverseTransitionDuration: const Duration(milliseconds: 240),
-        pageBuilder: (_, __, ___) => IsometrikCallPage(
-          controller: controller,
-          config: config,
-        ),
-        transitionsBuilder: (BuildContext routeContext, Animation<double> animation,
-            Animation<double> secondaryAnimation, Widget child) {
-          final viewport = MediaQuery.sizeOf(routeContext);
-          final fullRect = Offset.zero & viewport;
-          final pipOffset = minimizedOffset ?? controller.minimizedWindowOffset;
-          final pipRect = Rect.fromLTWH(
-            pipOffset.dx,
-            pipOffset.dy,
-            _kMinimizedWindowSize.width,
-            _kMinimizedWindowSize.height,
-          );
+        pageBuilder: (_, __, ___) =>
+            IsometrikCallPage(controller: controller, config: config),
+        transitionsBuilder:
+            (
+              BuildContext routeContext,
+              Animation<double> animation,
+              Animation<double> secondaryAnimation,
+              Widget child,
+            ) {
+              final viewport = MediaQuery.sizeOf(routeContext);
+              final fullRect = Offset.zero & viewport;
+              final pipOffset =
+                  minimizedOffset ?? controller.minimizedWindowOffset;
+              final pipRect = Rect.fromLTWH(
+                pipOffset.dx,
+                pipOffset.dy,
+                _kMinimizedWindowSize.width,
+                _kMinimizedWindowSize.height,
+              );
 
-          final curved = CurvedAnimation(
-            parent: animation,
-            curve: Curves.easeOutCubic,
-            reverseCurve: Curves.easeInCubic,
-          );
-          final isReversing = animation.status == AnimationStatus.reverse;
-          final fromRect = isReversing
-              ? fullRect
-              : (animateFromMinimized ? pipRect : fullRect);
-          final toRect = isReversing && controller.isMinimized ? pipRect : fullRect;
-          final rect = Rect.lerp(fromRect, toRect, curved.value) ?? fullRect;
-          final rounded = (animateFromMinimized && !isReversing) ||
-              (isReversing && controller.isMinimized);
-          final radius = BorderRadius.circular(rounded ? 14 * (1 - curved.value) : 0);
+              final curved = CurvedAnimation(
+                parent: animation,
+                curve: Curves.easeOutCubic,
+                reverseCurve: Curves.easeInCubic,
+              );
+              final isReversing = animation.status == AnimationStatus.reverse;
+              final fromRect = isReversing
+                  ? fullRect
+                  : (animateFromMinimized ? pipRect : fullRect);
+              final toRect = isReversing && controller.isMinimized
+                  ? pipRect
+                  : fullRect;
+              final rect =
+                  Rect.lerp(fromRect, toRect, curved.value) ?? fullRect;
+              final rounded =
+                  (animateFromMinimized && !isReversing) ||
+                  (isReversing && controller.isMinimized);
+              final radius = BorderRadius.circular(
+                rounded ? 14 * (1 - curved.value) : 0,
+              );
 
-          if (rect == fullRect && radius == BorderRadius.zero) {
-            return child;
-          }
-          return Stack(
-            children: <Widget>[
-              Positioned.fromRect(
-                rect: rect,
-                child: ClipRRect(borderRadius: radius, child: child),
-              ),
-            ],
-          );
-        },
+              if (rect == fullRect && radius == BorderRadius.zero) {
+                return child;
+              }
+              return Stack(
+                children: <Widget>[
+                  Positioned.fromRect(
+                    rect: rect,
+                    child: ClipRRect(borderRadius: radius, child: child),
+                  ),
+                ],
+              );
+            },
       ),
     );
   }
@@ -191,14 +200,28 @@ class _IsometrikCallPageState extends State<IsometrikCallPage> {
   bool _incomingBlurRevealed = false;
 
   static const Size _pipSize = Size(122, 178);
-  static const EdgeInsets _pipEdgePadding = EdgeInsets.fromLTRB(18, 96, 18, 156);
+  static const EdgeInsets _pipEdgePadding = EdgeInsets.fromLTRB(
+    18,
+    96,
+    18,
+    156,
+  );
 
   IsometrikCallController get _ctrl => widget.controller;
   IsometrikCallPageConfig get _cfg => widget.config;
   bool get _isIncomingBlurEnabled => _ctrl.shouldBlurIncomingCallByDefault;
-  bool get _showIncomingBlur => _isIncomingBlurEnabled && !_incomingBlurRevealed;
+  bool get _showIncomingBlur =>
+      _isIncomingBlurEnabled && !_incomingBlurRevealed;
   bool get _canRevealIncomingBlur =>
       _cfg.canRevealIncomingBlur?.call(_ctrl) ?? true;
+
+  VideoTrack? _localPreviewTrack;
+
+  Future<void> initLocalCamera() async {
+    final track = await LocalVideoTrack.createCameraTrack();
+    _localPreviewTrack = track;
+    setState(() {});
+  }
 
   void _runAction(Future<void> Function() action, {String? label}) {
     unawaited(
@@ -216,9 +239,10 @@ class _IsometrikCallPageState extends State<IsometrikCallPage> {
     _IsometrikCallViewRegistry.markVisible(_ctrl.meetingId);
     _ctrl.addListener(_onControllerChanged);
     unawaited(_requestPermissionsOnPageOpen());
+    initLocalCamera();
   }
 
-   @override
+  @override
   void didUpdateWidget(covariant IsometrikCallPage oldWidget) {
     super.didUpdateWidget(oldWidget);
     if (oldWidget.controller.meetingId != widget.controller.meetingId) {
@@ -387,7 +411,8 @@ class _IsometrikCallPageState extends State<IsometrikCallPage> {
     final videoReq = _ctrl.videoUpgradeRequest;
     final isEnded = _ctrl.status == IsometrikCallStatus.ended;
     final permissionBlocked = _ctrl.hasMissingPermissions;
-    final showVideoLayout = _ctrl.hasVideo && _ctrl.hasAnyVideoStreaming;
+    final showVideoLayout = _ctrl.hasVideo;
+    // && _ctrl.hasAnyVideoStreaming;
     final mediaPadding = MediaQuery.paddingOf(context);
     final topInset = mediaPadding.top;
     final bottomInset = mediaPadding.bottom;
@@ -398,114 +423,117 @@ class _IsometrikCallPageState extends State<IsometrikCallPage> {
         backgroundColor: _cfg.backgroundColor,
         body: Stack(
           children: <Widget>[
-              Positioned.fill(
-                child: AnimatedSwitcher(
-                  duration: const Duration(milliseconds: 280),
-                  switchInCurve: Curves.easeOutCubic,
-                  switchOutCurve: Curves.easeInCubic,
-                  child: showVideoLayout
-                      ? _buildVideoCallBody(key: const ValueKey('video_layout'))
-                      : _buildAudioCallBody(key: const ValueKey('audio_layout')),
+            Positioned.fill(
+              child: AnimatedSwitcher(
+                duration: const Duration(milliseconds: 280),
+                switchInCurve: Curves.easeOutCubic,
+                switchOutCurve: Curves.easeInCubic,
+                child: showVideoLayout
+                    ? _buildVideoCallBody(key: const ValueKey('video_layout'))
+                    : _buildAudioCallBody(key: const ValueKey('audio_layout')),
+              ),
+            ),
+            Positioned.fill(
+              child: IgnorePointer(
+                child: DecoratedBox(
+                  decoration: BoxDecoration(
+                    gradient: LinearGradient(
+                      begin: Alignment.topCenter,
+                      end: Alignment.bottomCenter,
+                      colors: <Color>[
+                        Colors.black.withValues(alpha: 0.45),
+                        Colors.transparent,
+                        Colors.black.withValues(alpha: 0.52),
+                      ],
+                    ),
+                  ),
                 ),
               ),
+            ),
+            if (_showIncomingBlur && _ctrl.hasVideo)
               Positioned.fill(
                 child: IgnorePointer(
-                  child: DecoratedBox(
-                    decoration: BoxDecoration(
-                      gradient: LinearGradient(
-                        begin: Alignment.topCenter,
-                        end: Alignment.bottomCenter,
-                        colors: <Color>[
-                          Colors.black.withValues(alpha: 0.45),
-                          Colors.transparent,
-                          Colors.black.withValues(alpha: 0.52),
-                        ],
-                      ),
+                  child: BackdropFilter(
+                    filter: ImageFilter.blur(sigmaX: 20, sigmaY: 20),
+                    child: Container(
+                      color: Colors.black.withValues(alpha: 0.24),
                     ),
                   ),
                 ),
               ),
-              if (_showIncomingBlur && _ctrl.hasVideo)
-                Positioned.fill(
-                  child: IgnorePointer(
-                    child: BackdropFilter(
-                      filter: ImageFilter.blur(sigmaX: 20, sigmaY: 20),
-                      child: Container(color: Colors.black.withValues(alpha: 0.24)),
-                    ),
-                  ),
-                ),
+            Positioned(
+              top: topInset + 12,
+              left: 12,
+              right: 12,
+              child: _buildTopSection(showVideoLayout: showVideoLayout),
+            ),
+            Positioned(
+              top: topInset + 14,
+              left: 14,
+              child: _TopOverlayIconButton(
+                icon: Icons.close_fullscreen_rounded,
+                onTap: () => unawaited(_minimizeCallView()),
+              ),
+            ),
+            if (permissionBlocked)
               Positioned(
-                top: topInset + 12,
+                top: 122,
                 left: 12,
                 right: 12,
-                child: _buildTopSection(showVideoLayout: showVideoLayout),
+                child: _buildPermissionFallbackCard(),
               ),
-              Positioned(
-                top: topInset + 14,
-                left: 14,
-                child: _TopOverlayIconButton(
-                  icon: Icons.close_fullscreen_rounded,
-                  onTap: () => unawaited(_minimizeCallView()),
+            if (videoReq != null)
+              Positioned.fill(
+                child: Center(
+                  child: Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 16),
+                    child: _buildVideoUpgradeBanner(videoReq),
+                  ),
                 ),
               ),
-              if (permissionBlocked)
-                Positioned(
-                  top: 122,
-                  left: 12,
-                  right: 12,
-                  child: _buildPermissionFallbackCard(),
-                ),
-              if (videoReq != null)
-                Positioned(
-                  top: permissionBlocked ? 252 : 122,
-                  left: 12,
-                  right: 12,
-                  child: _buildVideoUpgradeBanner(videoReq),
-                ),
-              // if (_cfg.showVideoUpgradeButton &&
-              //     !_ctrl.hasVideo &&
-              //     _ctrl.status == IsometrikCallStatus.connected &&
-              //     videoReq == null &&
-              //     !permissionBlocked)
-              //   Positioned(
-              //     left: 24,
-              //     right: 24,
-              //     bottom: 138,
-              //     child: _buildVideoUpgradeRequestButton(),
-              //   ),
+            // if (_cfg.showVideoUpgradeButton &&
+            //     !_ctrl.hasVideo &&
+            //     _ctrl.status == IsometrikCallStatus.connected &&
+            //     videoReq == null &&
+            //     !permissionBlocked)
+            //   Positioned(
+            //     left: 24,
+            //     right: 24,
+            //     bottom: 138,
+            //     child: _buildVideoUpgradeRequestButton(),
+            //   ),
+            Positioned(
+              left: 12,
+              right: 12,
+              bottom: bottomInset + 28,
+              child:
+                  _cfg.controlsBuilder?.call(context, _ctrl) ??
+                  _buildModernControls(isEnded, permissionBlocked),
+            ),
+            if (_showIncomingBlur && _ctrl.hasVideo)
               Positioned(
                 left: 12,
                 right: 12,
-                bottom: bottomInset + 28,
-                child: _cfg.controlsBuilder?.call(context, _ctrl) ??
-                    _buildModernControls(isEnded, permissionBlocked),
-              ),
-              if (_showIncomingBlur && _ctrl.hasVideo)
-                Positioned(
-                  left: 12,
-                  right: 12,
-                  bottom: bottomInset + 128,
-                  child: Center(
-                    child: FilledButton.icon(
-                      onPressed: () {
-                        if (!_canRevealIncomingBlur) {
-                          return;
-                        }
-                        setState(() {
-                          _incomingBlurRevealed = true;
-                        });
-                      },
-                      style: FilledButton.styleFrom(
-                        backgroundColor: _cfg.unblurButtonBackgroundColor,
-                        foregroundColor: _cfg.unblurButtonForegroundColor,
-                      ),
-                      icon: const Icon(Icons.visibility_rounded),
-                      label: Text(
-                        _cfg.unblurButtonText,
-                      ),
+                bottom: bottomInset + 128,
+                child: Center(
+                  child: FilledButton.icon(
+                    onPressed: () {
+                      if (!_canRevealIncomingBlur) {
+                        return;
+                      }
+                      setState(() {
+                        _incomingBlurRevealed = true;
+                      });
+                    },
+                    style: FilledButton.styleFrom(
+                      backgroundColor: _cfg.unblurButtonBackgroundColor,
+                      foregroundColor: _cfg.unblurButtonForegroundColor,
                     ),
+                    icon: const Icon(Icons.visibility_rounded),
+                    label: Text(_cfg.unblurButtonText),
                   ),
                 ),
+              ),
           ],
         ),
       ),
@@ -555,7 +583,8 @@ class _IsometrikCallPageState extends State<IsometrikCallPage> {
               child: Column(
                 mainAxisSize: MainAxisSize.min,
                 children: <Widget>[
-                  _cfg.avatarBuilder?.call(context, _ctrl) ?? _buildDefaultAvatar(),
+                  _cfg.avatarBuilder?.call(context, _ctrl) ??
+                      _buildDefaultAvatar(),
                   // if (_cfg.showMeetingIdDebug) ...<Widget>[
                   //   const SizedBox(height: 14),
                   //   Text(
@@ -575,8 +604,11 @@ class _IsometrikCallPageState extends State<IsometrikCallPage> {
 
   Widget _buildVideoCallBody({Key? key}) {
     final room = _ctrl.liveKit.currentRoom;
-    final localTrack = room == null ? null : _firstVideoTrack(room.localParticipant);
-    final remoteParticipants = room?.remoteParticipants.values.toList() ?? <RemoteParticipant>[];
+    final localTrack = room == null
+        ? _localPreviewTrack
+        : _firstVideoTrack(room.localParticipant);
+    final remoteParticipants =
+        room?.remoteParticipants.values.toList() ?? <RemoteParticipant>[];
     final remoteTiles = <_ParticipantVideoTileData>[
       for (final p in remoteParticipants)
         _ParticipantVideoTileData(
@@ -585,6 +617,9 @@ class _IsometrikCallPageState extends State<IsometrikCallPage> {
         ),
     ];
 
+    if (remoteTiles.isEmpty && _ctrl.status != IsometrikCallStatus.connected) {
+      return _buildCallingUI(localTrack);
+    }
     if (remoteTiles.length <= 1) {
       return _buildOneToOneVideoBody(
         key: key,
@@ -600,30 +635,87 @@ class _IsometrikCallPageState extends State<IsometrikCallPage> {
     );
   }
 
+  Widget _buildCallingUI(VideoTrack? localTrack) {
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final height = constraints.maxHeight;
+        final topPadding = height * 0.08;
+        final bottomPadding = height * 0.05;
+
+        return Stack(
+          fit: StackFit.expand, // ← ensures Stack fills its parent
+          children: [
+            // ✅ Use VideoViewFit.cover directly — no FittedBox wrapper needed
+            Positioned.fill(
+              child: localTrack != null
+                  ? VideoTrackRenderer(localTrack, fit: VideoViewFit.cover)
+                  : Container(color: Colors.black),
+            ),
+
+            /// 🌫 Overlay
+            Positioned.fill(
+              child: Container(color: Colors.black.withValues(alpha: 0.25)),
+            ),
+
+            Padding(
+              padding: EdgeInsets.only(top: topPadding, bottom: bottomPadding),
+              child: Column(
+                children: [
+                  const Center(
+                    child: Text(
+                      "Ringing...",
+                      style: const TextStyle(
+                        color: Colors.white,
+                        fontWeight: FontWeight.w600,
+                        fontSize: 15,
+                      ),
+                    ),
+                  ),
+                  const Spacer(),
+                  SizedBox(height: bottomPadding),
+                ],
+              ),
+            ),
+          ],
+        );
+      },
+    );
+  }
+
   Widget _buildOneToOneVideoBody({
     Key? key,
     required _ParticipantVideoTileData? remoteTile,
     required VideoTrack? localTrack,
   }) {
-    final canFlipCamera = _ctrl.status != IsometrikCallStatus.ended &&
+    final canFlipCamera =
+        _ctrl.status != IsometrikCallStatus.ended &&
         !_ctrl.hasMissingPermissions &&
         _ctrl.isLocalVideoEnabled;
     final showLocalInFullscreen = _showLocalInFullscreen;
-    final fullScreenLabel =
-        showLocalInFullscreen ? 'You' : (remoteTile?.label ?? _ctrl.peerName);
-    final fullScreenTrack = showLocalInFullscreen ? localTrack : remoteTile?.track;
-    final fullScreenPlaceholder =
-        showLocalInFullscreen ? 'Camera off' : 'Waiting for remote video…';
-    final pipLabel = showLocalInFullscreen ? (remoteTile?.label ?? _ctrl.peerName) : 'You';
+    final fullScreenLabel = showLocalInFullscreen
+        ? 'You'
+        : (remoteTile?.label ?? _ctrl.peerName);
+    final fullScreenTrack = showLocalInFullscreen
+        ? localTrack
+        : remoteTile?.track;
+    final fullScreenPlaceholder = showLocalInFullscreen
+        ? 'Camera off'
+        : 'Waiting for remote video…';
+    final pipLabel = showLocalInFullscreen
+        ? (remoteTile?.label ?? _ctrl.peerName)
+        : 'You';
     final pipTrack = showLocalInFullscreen ? remoteTile?.track : localTrack;
-    final pipPlaceholder = showLocalInFullscreen ? 'Waiting for remote video…' : 'Camera off';
+    final pipPlaceholder = showLocalInFullscreen
+        ? 'Waiting for remote video…'
+        : 'Camera off';
 
     return LayoutBuilder(
       key: key,
       builder: (BuildContext context, BoxConstraints constraints) {
         final canvasSize = Size(constraints.maxWidth, constraints.maxHeight);
         final lastSize = _lastPipCanvasSize;
-        final shouldReanchorFromCorner = !_isDraggingPip &&
+        final shouldReanchorFromCorner =
+            !_isDraggingPip &&
             lastSize != null &&
             ((lastSize.width - canvasSize.width).abs() > 0.5 ||
                 (lastSize.height - canvasSize.height).abs() > 0.5);
@@ -708,8 +800,10 @@ class _IsometrikCallPageState extends State<IsometrikCallPage> {
                         child: _VideoOverlayActionButton(
                           icon: Icons.cameraswitch_rounded,
                           enabled: canFlipCamera,
-                          onTap: () =>
-                              _runAction(_ctrl.flipCamera, label: 'flip_camera_overlay'),
+                          onTap: () => _runAction(
+                            _ctrl.flipCamera,
+                            label: 'flip_camera_overlay',
+                          ),
                         ),
                       ),
                   ],
@@ -723,7 +817,10 @@ class _IsometrikCallPageState extends State<IsometrikCallPage> {
                 child: _VideoOverlayActionButton(
                   icon: Icons.cameraswitch_rounded,
                   enabled: canFlipCamera,
-                  onTap: () => _runAction(_ctrl.flipCamera, label: 'flip_camera_overlay'),
+                  onTap: () => _runAction(
+                    _ctrl.flipCamera,
+                    label: 'flip_camera_overlay',
+                  ),
                 ),
               ),
           ],
@@ -737,7 +834,8 @@ class _IsometrikCallPageState extends State<IsometrikCallPage> {
     required List<_ParticipantVideoTileData> remoteTiles,
     required VideoTrack? localTrack,
   }) {
-    final canFlipCamera = _ctrl.status != IsometrikCallStatus.ended &&
+    final canFlipCamera =
+        _ctrl.status != IsometrikCallStatus.ended &&
         !_ctrl.hasMissingPermissions &&
         _ctrl.isLocalVideoEnabled;
     final tiles = <_ParticipantVideoTileData>[
@@ -858,7 +956,8 @@ class _IsometrikCallPageState extends State<IsometrikCallPage> {
             crossAxisSpacing: spacing,
             childAspectRatio: 0.82,
           ),
-          itemBuilder: (BuildContext context, int index) => buildParticipantTile(index),
+          itemBuilder: (BuildContext context, int index) =>
+              buildParticipantTile(index),
         );
       },
     );
@@ -866,7 +965,8 @@ class _IsometrikCallPageState extends State<IsometrikCallPage> {
 
   Widget _buildDefaultAvatar() {
     // Pulsing ring animation for calling/ringing states.
-    final showPulse = _ctrl.status == IsometrikCallStatus.calling ||
+    final showPulse =
+        _ctrl.status == IsometrikCallStatus.calling ||
         _ctrl.status == IsometrikCallStatus.ringing;
 
     return Center(
@@ -895,51 +995,52 @@ class _IsometrikCallPageState extends State<IsometrikCallPage> {
   }
 
   Widget _buildVideoUpgradeBanner(IsometrikMeeting meeting) {
-    return Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+    return Center(
       child: Material(
-        color: Colors.white10,
-        borderRadius: BorderRadius.circular(12),
-        child: Padding(
-          padding: const EdgeInsets.all(14),
+        color: Colors.transparent,
+        child: Container(
+          width: 300,
+          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 18),
+          decoration: BoxDecoration(
+            color: Colors.white,
+            borderRadius: BorderRadius.circular(14),
+          ),
           child: Column(
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: <Widget>[
+            mainAxisSize: MainAxisSize.min,
+            children: [
               Text(
                 '${meeting.senderName ?? 'Peer'} wants to switch to video',
-                style: const TextStyle(color: Colors.white, fontSize: 14),
+                textAlign: TextAlign.center,
+                style: const TextStyle(color: Colors.black87, fontSize: 15),
               ),
-              const SizedBox(height: 10),
+              const SizedBox(height: 16),
+
               Row(
-                children: <Widget>[
-                  Expanded(
-                    child: FilledButton(
-                      onPressed: _ctrl.isPublishBusy
-                          ? null
-                          : () => _runAction(
-                                () => _ctrl.respondToVideoUpgrade(accept: true),
-                                label: 'video_upgrade_accept',
-                              ),
-                      style: FilledButton.styleFrom(
-                        backgroundColor: Colors.green,
-                      ),
-                      child: const Text('Accept'),
+                mainAxisAlignment: MainAxisAlignment.end,
+                children: [
+                  TextButton(
+                    onPressed: _ctrl.isPublishBusy
+                        ? null
+                        : () => _runAction(
+                            () => _ctrl.respondToVideoUpgrade(accept: false),
+                            label: 'video_upgrade_decline',
+                          ),
+                    child: const Text(
+                      'Cancel',
+                      style: TextStyle(color: Colors.green),
                     ),
                   ),
-                  const SizedBox(width: 10),
-                  Expanded(
-                    child: OutlinedButton(
-                      onPressed: _ctrl.isPublishBusy
-                          ? null
-                          : () => _runAction(
-                                () => _ctrl.respondToVideoUpgrade(accept: false),
-                                label: 'video_upgrade_decline',
-                              ),
-                      style: OutlinedButton.styleFrom(
-                        foregroundColor: Colors.white70,
-                        side: const BorderSide(color: Colors.white24),
-                      ),
-                      child: const Text('Decline'),
+                  const SizedBox(width: 8),
+                  TextButton(
+                    onPressed: _ctrl.isPublishBusy
+                        ? null
+                        : () => _runAction(
+                            () => _ctrl.respondToVideoUpgrade(accept: true),
+                            label: 'video_upgrade_accept',
+                          ),
+                    child: const Text(
+                      'Switch',
+                      style: TextStyle(color: Colors.green),
                     ),
                   ),
                 ],
@@ -992,7 +1093,8 @@ class _IsometrikCallPageState extends State<IsometrikCallPage> {
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: <Widget>[
             Text(
-              _ctrl.permissionsMessage ?? 'Required call permissions are missing.',
+              _ctrl.permissionsMessage ??
+                  'Required call permissions are missing.',
               style: const TextStyle(color: Colors.white, fontSize: 13),
             ),
             const SizedBox(height: 10),
@@ -1014,12 +1116,9 @@ class _IsometrikCallPageState extends State<IsometrikCallPage> {
                 const SizedBox(width: 10),
                 Expanded(
                   child: FilledButton(
-                    onPressed: () => _runAction(
-                      () async {
-                        await _ctrl.openPermissionSettings();
-                      },
-                      label: 'open_settings',
-                    ),
+                    onPressed: () => _runAction(() async {
+                      await _ctrl.openPermissionSettings();
+                    }, label: 'open_settings'),
                     style: FilledButton.styleFrom(
                       backgroundColor: Colors.orange,
                     ),
@@ -1041,7 +1140,9 @@ class _IsometrikCallPageState extends State<IsometrikCallPage> {
       items: <_CallControlItem>[
         _CallControlItem(
           icon: canToggleVideo
-              ? (_ctrl.isLocalVideoEnabled ? Icons.videocam : Icons.videocam_off)
+              ? (_ctrl.isLocalVideoEnabled
+                    ? Icons.videocam
+                    : Icons.videocam_off)
               : Icons.videocam_outlined,
           isDisabled: isDisabled,
           onTap: isDisabled
@@ -1061,7 +1162,9 @@ class _IsometrikCallPageState extends State<IsometrikCallPage> {
                 },
         ),
         _CallControlItem(
-          icon: _ctrl.isSpeaker ? Icons.volume_up_rounded : Icons.volume_down_rounded,
+          icon: _ctrl.isSpeaker
+              ? Icons.volume_up_rounded
+              : Icons.volume_down_rounded,
           isActive: _ctrl.isSpeaker,
           isDisabled: isDisabled,
           onTap: isDisabled
@@ -1072,14 +1175,17 @@ class _IsometrikCallPageState extends State<IsometrikCallPage> {
           icon: _ctrl.isMuted ? Icons.mic_off_rounded : Icons.mic_rounded,
           isActive: _ctrl.isMuted,
           isDisabled: isDisabled,
-          onTap:
-              isDisabled ? null : () => _runAction(_ctrl.toggleMute, label: 'toggle_mute'),
+          onTap: isDisabled
+              ? null
+              : () => _runAction(_ctrl.toggleMute, label: 'toggle_mute'),
         ),
         _CallControlItem(
           icon: Icons.call_end_rounded,
           isDanger: true,
           isDisabled: isEnded,
-          onTap: isEnded ? null : () => _runAction(_ctrl.endCall, label: 'end_call'),
+          onTap: isEnded
+              ? null
+              : () => _runAction(_ctrl.endCall, label: 'end_call'),
         ),
       ],
     );
@@ -1097,12 +1203,37 @@ class _IsometrikCallPageState extends State<IsometrikCallPage> {
   Widget _buildTopSection({required bool showVideoLayout}) {
     final subtitleText = _topSubtitle(showVideoLayout: showVideoLayout);
     final chipText = _statusChipText(showVideoLayout: showVideoLayout);
+
+    // ── Build participant name line for group calls ──────────────────────────
+    final room = _ctrl.liveKit.currentRoom;
+    final remoteParticipants = room?.remoteParticipants.values.toList() ?? [];
+    final isGroupCall = remoteParticipants.length > 1;
+
+    // Collect names: show up to 3, then "+N more"
+    String headerName;
+    if (isGroupCall) {
+      final names = remoteParticipants
+          .map((p) => p.identity.isNotEmpty ? p.identity : 'Unknown')
+          .toList();
+      if (names.length <= 3) {
+        headerName = names.join(', ');
+      } else {
+        final visible = names.take(3).join(', ');
+        headerName = '$visible +${names.length - 3} more';
+      }
+    } else {
+      headerName = _ctrl.peerName;
+    }
+    // ─────────────────────────────────────────────────────────────────────────
+
     return Column(
       children: <Widget>[
         const SizedBox(height: 10),
         Text(
-          _ctrl.peerName,
+          headerName,
           textAlign: TextAlign.center,
+          maxLines: 2,
+          overflow: TextOverflow.ellipsis,
           style: const TextStyle(
             color: Colors.white,
             fontWeight: FontWeight.w600,
@@ -1130,7 +1261,10 @@ class _IsometrikCallPageState extends State<IsometrikCallPage> {
                   key: const ValueKey('status_chip'),
                   padding: const EdgeInsets.only(top: 8),
                   child: Container(
-                    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 12,
+                      vertical: 6,
+                    ),
                     decoration: BoxDecoration(
                       color: Colors.black.withValues(alpha: 0.3),
                       borderRadius: BorderRadius.circular(20),
@@ -1185,21 +1319,13 @@ class _IsometrikCallPageState extends State<IsometrikCallPage> {
 // -----------------------------------------------------------------------------
 
 class _ParticipantVideoTileData {
-  const _ParticipantVideoTileData({
-    required this.label,
-    required this.track,
-  });
+  const _ParticipantVideoTileData({required this.label, required this.track});
 
   final String label;
   final VideoTrack? track;
 }
 
-enum _PipCorner {
-  topLeft,
-  topRight,
-  bottomLeft,
-  bottomRight,
-}
+enum _PipCorner { topLeft, topRight, bottomLeft, bottomRight }
 
 class _VideoTile extends StatelessWidget {
   const _VideoTile({
@@ -1231,15 +1357,15 @@ class _VideoTile extends StatelessWidget {
               // Prevent internal renderer from handling tap gestures
               // (some flutter_webrtc versions use taps for focus/exposure).
               ignoring: ignoreVideoGestures,
-              child: VideoTrackRenderer(
-                track!,
-                fit: VideoViewFit.cover,
-              ),
+              child: VideoTrackRenderer(track!, fit: VideoViewFit.cover),
             )
           else
             Center(
               child: Container(
-                padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 14,
+                  vertical: 8,
+                ),
                 decoration: BoxDecoration(
                   color: Colors.black.withValues(alpha: 0.45),
                   borderRadius: BorderRadius.circular(16),
@@ -1281,7 +1407,8 @@ class _VideoTile extends StatelessWidget {
 }
 
 class _IsometrikMinimizedCallOverlay {
-  static final Map<String, _OverlayHandle> _handles = <String, _OverlayHandle>{};
+  static final Map<String, _OverlayHandle> _handles =
+      <String, _OverlayHandle>{};
   static final Set<String> _restoringMeetingIds = <String>{};
 
   static void show({
@@ -1291,7 +1418,8 @@ class _IsometrikMinimizedCallOverlay {
   }) {
     if (_handles.containsKey(controller.meetingId)) return;
     if (controller.status == IsometrikCallStatus.ended) return;
-    final overlay = Navigator.maybeOf(context, rootNavigator: true)?.overlay ??
+    final overlay =
+        Navigator.maybeOf(context, rootNavigator: true)?.overlay ??
         Navigator.maybeOf(context)?.overlay;
     if (overlay == null) return;
     final offset = ValueNotifier<Offset>(controller.minimizedWindowOffset);
@@ -1334,12 +1462,15 @@ class _IsometrikMinimizedCallOverlay {
                   offset.value = snapped;
                 },
                 onTap: () {
-                  if (_restoringMeetingIds.contains(controller.meetingId)) return;
+                  if (_restoringMeetingIds.contains(controller.meetingId))
+                    return;
                   _restoringMeetingIds.add(controller.meetingId);
                   final restoreOffset = offset.value;
                   controller.setMinimizedWindowOffset(restoreOffset);
                   dismiss(controller.meetingId);
-                  if (!_IsometrikCallViewRegistry.isVisible(controller.meetingId) &&
+                  if (!_IsometrikCallViewRegistry.isVisible(
+                        controller.meetingId,
+                      ) &&
                       controller.status != IsometrikCallStatus.ended) {
                     controller.setMinimized(false);
                     IsometrikCallPage.show(
@@ -1398,15 +1529,23 @@ class _IsometrikMinimizedCallOverlay {
   }
 
   static Offset _constrainOffset(Offset value, Size canvas, Size box) {
-    final dx = value.dx.clamp(8.0, (canvas.width - box.width - 8).clamp(8.0, canvas.width));
-    final dy = value.dy.clamp(40.0, (canvas.height - box.height - 8).clamp(40.0, canvas.height));
+    final dx = value.dx.clamp(
+      8.0,
+      (canvas.width - box.width - 8).clamp(8.0, canvas.width),
+    );
+    final dy = value.dy.clamp(
+      40.0,
+      (canvas.height - box.height - 8).clamp(40.0, canvas.height),
+    );
     return Offset(dx.toDouble(), dy.toDouble());
   }
 
   static Offset _snapToNearestSide(Offset value, Size canvas, Size box) {
     final constrained = _constrainOffset(value, canvas, box);
     const left = 8.0;
-    final right = (canvas.width - box.width - 8).clamp(8.0, canvas.width).toDouble();
+    final right = (canvas.width - box.width - 8)
+        .clamp(8.0, canvas.width)
+        .toDouble();
     final leftDistance = (constrained.dx - left).abs();
     final rightDistance = (right - constrained.dx).abs();
     final dx = leftDistance <= rightDistance ? left : right;
@@ -1433,11 +1572,14 @@ class _OverlayHandle {
 class _IsometrikCallViewRegistry {
   static final Set<String> _visibleMeetingIds = <String>{};
 
-  static void markVisible(String meetingId) => _visibleMeetingIds.add(meetingId);
+  static void markVisible(String meetingId) =>
+      _visibleMeetingIds.add(meetingId);
 
-  static void markHidden(String meetingId) => _visibleMeetingIds.remove(meetingId);
+  static void markHidden(String meetingId) =>
+      _visibleMeetingIds.remove(meetingId);
 
-  static bool isVisible(String meetingId) => _visibleMeetingIds.contains(meetingId);
+  static bool isVisible(String meetingId) =>
+      _visibleMeetingIds.contains(meetingId);
 }
 
 class _MinimizedCallWindow extends StatelessWidget {
@@ -1452,16 +1594,16 @@ class _MinimizedCallWindow extends StatelessWidget {
         ? null
         : _firstParticipantTrack(room.localParticipant?.videoTrackPublications);
     final selfInitial = _resolveSelfInitial(room?.localParticipant);
-    final remoteParticipants = room?.remoteParticipants.values.toList() ?? <RemoteParticipant>[];
+    final remoteParticipants =
+        room?.remoteParticipants.values.toList() ?? <RemoteParticipant>[];
     final primaryRemoteTrack = remoteParticipants.isEmpty
         ? null
-        : _firstParticipantTrack(remoteParticipants.first.videoTrackPublications);
+        : _firstParticipantTrack(
+            remoteParticipants.first.videoTrackPublications,
+          );
     final remoteNames = <String>[
       for (var i = 0; i < remoteParticipants.length; i++)
-        _displayNameForParticipant(
-          remoteParticipants[i],
-          fallbackIndex: i + 1,
-        ),
+        _displayNameForParticipant(remoteParticipants[i], fallbackIndex: i + 1),
     ];
     final remoteCount = remoteNames.length;
     final isOneToOneMini = remoteCount <= 1;
@@ -1474,7 +1616,11 @@ class _MinimizedCallWindow extends StatelessWidget {
         borderRadius: BorderRadius.circular(16),
         border: Border.all(color: Colors.white.withValues(alpha: 0.08)),
         boxShadow: const <BoxShadow>[
-          BoxShadow(color: Colors.black54, blurRadius: 14, offset: Offset(0, 6)),
+          BoxShadow(
+            color: Colors.black54,
+            blurRadius: 14,
+            offset: Offset(0, 6),
+          ),
         ],
       ),
       child: ClipRRect(
@@ -1483,16 +1629,18 @@ class _MinimizedCallWindow extends StatelessWidget {
           padding: isOneToOneMini ? EdgeInsets.zero : const EdgeInsets.all(6),
           child: switch (remoteCount) {
             0 || 1 => _buildOneToOneLayout(
-                remoteName: remoteCount == 0 ? controller.peerName : remoteNames.first,
-                remoteTrack: primaryRemoteTrack,
-                localTrack: localTrack,
-                selfInitial: selfInitial,
-              ),
+              remoteName: remoteCount == 0
+                  ? controller.peerName
+                  : remoteNames.first,
+              remoteTrack: primaryRemoteTrack,
+              localTrack: localTrack,
+              selfInitial: selfInitial,
+            ),
             _ => _buildGridRemoteLayout(
-                remoteNames,
-                localTrack: localTrack,
-                selfInitial: selfInitial,
-              ),
+              remoteNames,
+              localTrack: localTrack,
+              selfInitial: selfInitial,
+            ),
           },
         ),
       ),
@@ -1512,14 +1660,8 @@ class _MinimizedCallWindow extends StatelessWidget {
           child: ClipRRect(
             borderRadius: BorderRadius.circular(16),
             child: remoteTrack != null
-                ? VideoTrackRenderer(
-                    remoteTrack,
-                    fit: VideoViewFit.cover,
-                  )
-                : _MiniProfileTile(
-                    name: remoteName,
-                    emphasize: true,
-                  ),
+                ? VideoTrackRenderer(remoteTrack, fit: VideoViewFit.cover)
+                : _MiniProfileTile(name: remoteName, emphasize: true),
           ),
         ),
         Positioned(
@@ -1573,7 +1715,8 @@ class _MinimizedCallWindow extends StatelessWidget {
                 childAspectRatio: 1.06,
               ),
               itemBuilder: (BuildContext context, int index) {
-                final isOverflowCell = index == visibleCount - 1 && hiddenCount > 0;
+                final isOverflowCell =
+                    index == visibleCount - 1 && hiddenCount > 0;
                 return _MiniProfileTile(
                   name: remoteNames[index],
                   compact: true,
@@ -1767,7 +1910,10 @@ class _MiniProfileTile extends StatelessWidget {
                     right: 3,
                     bottom: 3,
                     child: Container(
-                      padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 1),
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 4,
+                        vertical: 1,
+                      ),
                       decoration: BoxDecoration(
                         color: Colors.black.withValues(alpha: 0.72),
                         borderRadius: BorderRadius.circular(6),
@@ -1805,7 +1951,11 @@ class _MiniProfileTile extends StatelessWidget {
   }
 
   static String _initials(String value) {
-    final parts = value.trim().split(RegExp(r'\s+')).where((p) => p.isNotEmpty).toList();
+    final parts = value
+        .trim()
+        .split(RegExp(r'\s+'))
+        .where((p) => p.isNotEmpty)
+        .toList();
     if (parts.isEmpty) return '?';
     return parts.first[0].toUpperCase();
   }
@@ -1825,10 +1975,7 @@ class _MiniProfileTile extends StatelessWidget {
 }
 
 class _MiniSelfPreview extends StatelessWidget {
-  const _MiniSelfPreview({
-    required this.localTrack,
-    required this.selfInitial,
-  });
+  const _MiniSelfPreview({required this.localTrack, required this.selfInitial});
 
   final VideoTrack? localTrack;
   final String selfInitial;
@@ -1846,10 +1993,7 @@ class _MiniSelfPreview extends StatelessWidget {
         fit: StackFit.expand,
         children: <Widget>[
           if (localTrack != null)
-            VideoTrackRenderer(
-              localTrack!,
-              fit: VideoViewFit.cover,
-            )
+            VideoTrackRenderer(localTrack!, fit: VideoViewFit.cover)
           else
             Container(
               color: Colors.white10,
@@ -1936,13 +2080,13 @@ class _ControlIconButton extends StatelessWidget {
     final bgColor = item.isDanger
         ? Colors.red
         : item.isActive
-            ? Colors.white
-            : Colors.white.withValues(alpha: 0.18);
+        ? Colors.white
+        : Colors.white.withValues(alpha: 0.18);
     final iconColor = item.isDanger
         ? Colors.white
         : item.isActive
-            ? Colors.black
-            : Colors.white;
+        ? Colors.black
+        : Colors.white;
 
     return Material(
       color: item.isDisabled ? bgColor.withValues(alpha: 0.35) : bgColor,
@@ -1960,10 +2104,7 @@ class _ControlIconButton extends StatelessWidget {
 }
 
 class _TopOverlayIconButton extends StatelessWidget {
-  const _TopOverlayIconButton({
-    required this.icon,
-    required this.onTap,
-  });
+  const _TopOverlayIconButton({required this.icon, required this.onTap});
 
   final IconData icon;
   final VoidCallback onTap;
