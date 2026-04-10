@@ -424,6 +424,7 @@ class _IsometrikCallPageState extends State<IsometrikCallPage> {
         body: Stack(
           children: <Widget>[
             Positioned.fill(
+              top: 30,
               child: AnimatedSwitcher(
                 duration: const Duration(milliseconds: 280),
                 switchInCurve: Curves.easeOutCubic,
@@ -1224,6 +1225,9 @@ class _IsometrikCallPageState extends State<IsometrikCallPage> {
     } else {
       headerName = _ctrl.peerName;
     }
+    headerName = headerName.length > 26
+        ? '${headerName.substring(0, 26)}…'
+        : headerName;
     // ─────────────────────────────────────────────────────────────────────────
 
     return Column(
@@ -1232,7 +1236,7 @@ class _IsometrikCallPageState extends State<IsometrikCallPage> {
         Text(
           headerName,
           textAlign: TextAlign.center,
-          maxLines: 2,
+          maxLines: 1,
           overflow: TextOverflow.ellipsis,
           style: const TextStyle(
             color: Colors.white,
