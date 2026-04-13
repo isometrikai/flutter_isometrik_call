@@ -424,7 +424,6 @@ class _IsometrikCallPageState extends State<IsometrikCallPage> {
         body: Stack(
           children: <Widget>[
             Positioned.fill(
-              top: 30,
               child: AnimatedSwitcher(
                 duration: const Duration(milliseconds: 280),
                 switchInCurve: Curves.easeOutCubic,
@@ -637,49 +636,33 @@ class _IsometrikCallPageState extends State<IsometrikCallPage> {
   }
 
   Widget _buildCallingUI(VideoTrack? localTrack) {
-    return LayoutBuilder(
-      builder: (context, constraints) {
-        final height = constraints.maxHeight;
-        final topPadding = height * 0.08;
-        final bottomPadding = height * 0.05;
+    return Stack(
+      fit: StackFit.expand, // ← ensures Stack fills its parent
+      children: [
+        //  Use VideoViewFit.cover directly — no FittedBox wrapper needed
+        Positioned.fill(
+          child: localTrack != null
+              ? VideoTrackRenderer(localTrack, fit: VideoViewFit.cover)
+              : Container(color: Colors.black),
+        ),
 
-        return Stack(
-          fit: StackFit.expand, // ← ensures Stack fills its parent
-          children: [
-            // ✅ Use VideoViewFit.cover directly — no FittedBox wrapper needed
-            Positioned.fill(
-              child: localTrack != null
-                  ? VideoTrackRenderer(localTrack, fit: VideoViewFit.cover)
-                  : Container(color: Colors.black),
-            ),
-
-            /// 🌫 Overlay
-            Positioned.fill(
-              child: Container(color: Colors.black.withValues(alpha: 0.25)),
-            ),
-
-            Padding(
-              padding: EdgeInsets.only(top: topPadding, bottom: bottomPadding),
-              child: Column(
-                children: [
-                  const Center(
-                    child: Text(
-                      "Ringing...",
-                      style: const TextStyle(
-                        color: Colors.white,
-                        fontWeight: FontWeight.w600,
-                        fontSize: 15,
-                      ),
-                    ),
-                  ),
-                  const Spacer(),
-                  SizedBox(height: bottomPadding),
+        /// 🌫 Overlay
+        Positioned.fill(
+          child: Container(
+            decoration: BoxDecoration(
+              gradient: LinearGradient(
+                begin: Alignment.topCenter,
+                end: Alignment.bottomCenter,
+                colors: [
+                  Colors.black.withValues(alpha: 0.4),
+                  Colors.transparent,
+                  Colors.black.withValues(alpha: 0.5),
                 ],
               ),
             ),
-          ],
-        );
-      },
+          ),
+        ),
+      ],
     );
   }
 
@@ -1302,9 +1285,24 @@ class _IsometrikCallPageState extends State<IsometrikCallPage> {
   }
 
   String _topSubtitle({required bool showVideoLayout}) {
-    if (_ctrl.status == IsometrikCallStatus.connected) return _durationLine();
-    if (!showVideoLayout) return _statusLineForAudio();
-    return '';
+    //  Keep existing connected behavior
+    if (_ctrl.status == IsometrikCallStatus.connected) {
+      return _durationLine();
+    }
+
+    //  For audio calls → keep existing logic
+    if (!showVideoLayout) {
+      return _statusLineForAudio();
+    }
+
+    //  NEW: Handle video call states (this was missing)
+    return switch (_ctrl.status) {
+      IsometrikCallStatus.calling => 'Calling...',
+      IsometrikCallStatus.ringing => 'Ringing...',
+      IsometrikCallStatus.connecting => 'Connecting...',
+      IsometrikCallStatus.ended => 'Call ended',
+      IsometrikCallStatus.connected => '', // already handled above
+    };
   }
 
   String _statusLineForAudio() {
