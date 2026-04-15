@@ -218,7 +218,16 @@ class _IsometrikCallPageState extends State<IsometrikCallPage> {
   VideoTrack? _localPreviewTrack;
 
   Future<void> initLocalCamera() async {
+    // Only create a preview track if not yet connected to a LiveKit room.
+    if (_ctrl.liveKit.currentRoom != null) return;
     final track = await LocalVideoTrack.createCameraTrack();
+    if (!mounted) {
+      // Page was disposed before async gap finished — clean up immediately.
+      try {
+        await track.stop();
+      } catch (_) {}
+      return;
+    }
     _localPreviewTrack = track;
     setState(() {});
   }
@@ -254,11 +263,28 @@ class _IsometrikCallPageState extends State<IsometrikCallPage> {
   void dispose() {
     _IsometrikCallViewRegistry.markHidden(_ctrl.meetingId);
     _ctrl.removeListener(_onControllerChanged);
+    _disposeLocalPreviewTrack();
     super.dispose();
+  }
+
+  Future<void> _disposeLocalPreviewTrack() async {
+    final track = _localPreviewTrack;
+    if (track == null) return;
+    _localPreviewTrack = null;
+    try {
+      await track.stop();
+    } catch (_) {}
   }
 
   void _onControllerChanged() {
     if (!mounted) return;
+
+    // Once the LiveKit room is established, the standalone preview track is
+    // no longer needed. Release it so the camera is not captured twice.
+    if (_localPreviewTrack != null && _ctrl.liveKit.currentRoom != null) {
+      _disposeLocalPreviewTrack();
+    }
+
     setState(() {});
 
     if (_ctrl.status == IsometrikCallStatus.ended &&
@@ -373,6 +399,12 @@ class _IsometrikCallPageState extends State<IsometrikCallPage> {
     if (_ctrl.isMinimized) return true;
     final overlayAnchorContext =
         Navigator.maybeOf(context, rootNavigator: true)?.context ?? context;
+
+    // Stop the local preview track before minimizing so the camera hardware
+    // is fully released. The minimized overlay renders from the LiveKit room
+    // track, which is managed by the controller — not this standalone preview.
+    await _disposeLocalPreviewTrack();
+
     _ctrl.setMinimized(true);
     final popped = await _popCallRoute();
     if (!popped) {
@@ -1584,13 +1616,44 @@ class _IsometrikCallViewRegistry {
       _visibleMeetingIds.contains(meetingId);
 }
 
-class _MinimizedCallWindow extends StatelessWidget {
+class _MinimizedCallWindow extends StatefulWidget {
   const _MinimizedCallWindow({required this.controller});
 
   final IsometrikCallController controller;
 
   @override
+  State<_MinimizedCallWindow> createState() => _MinimizedCallWindowState();
+}
+
+class _MinimizedCallWindowState extends State<_MinimizedCallWindow> {
+  @override
+  void initState() {
+    super.initState();
+    widget.controller.addListener(_onControllerChanged);
+  }
+
+  @override
+  void didUpdateWidget(covariant _MinimizedCallWindow oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.controller != widget.controller) {
+      oldWidget.controller.removeListener(_onControllerChanged);
+      widget.controller.addListener(_onControllerChanged);
+    }
+  }
+
+  @override
+  void dispose() {
+    widget.controller.removeListener(_onControllerChanged);
+    super.dispose();
+  }
+
+  void _onControllerChanged() {
+    if (mounted) setState(() {});
+  }
+
+  @override
   Widget build(BuildContext context) {
+    final controller = widget.controller;
     final room = controller.liveKit.currentRoom;
     final localTrack = room == null
         ? null
@@ -1678,7 +1741,7 @@ class _MinimizedCallWindow extends StatelessWidget {
           left: 6,
           bottom: 6,
           child: Text(
-            controller.statusText,
+            widget.controller.statusText,
             maxLines: 1,
             overflow: TextOverflow.ellipsis,
             style: const TextStyle(
