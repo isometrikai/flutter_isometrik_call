@@ -716,13 +716,13 @@ class _IsometrikCallPageState extends State<IsometrikCallPage> {
         : remoteTile?.track;
     final fullScreenPlaceholder = showLocalInFullscreen
         ? 'Camera off'
-        : 'Waiting for remote video…';
+        : 'Waiting for other user to join…';
     final pipLabel = showLocalInFullscreen
         ? (remoteTile?.label ?? _ctrl.peerName)
         : 'You';
     final pipTrack = showLocalInFullscreen ? remoteTile?.track : localTrack;
     final pipPlaceholder = showLocalInFullscreen
-        ? 'Waiting for remote video…'
+        ? 'Waiting for other user to join…'
         : 'Camera off';
 
     return LayoutBuilder(

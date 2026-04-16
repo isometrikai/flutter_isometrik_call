@@ -59,6 +59,7 @@ class IsometrikCallController extends ChangeNotifier {
     IsometrikCallStatus initialStatus = IsometrikCallStatus.calling,
   }) : _status = initialStatus {
     _localVideoEnabled = hasVideo;
+    _speaker = hasVideo;
     _attach();
   }
 
