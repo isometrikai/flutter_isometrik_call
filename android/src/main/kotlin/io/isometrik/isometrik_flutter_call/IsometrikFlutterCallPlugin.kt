@@ -139,9 +139,10 @@ class IsometrikFlutterCallPlugin :
         }
         val hasVideo = call.argument<Boolean>("hasVideo") ?: false
         val metadata = normalizeMetadata(call.argument<Any?>("metadata"))
+        val incomingDisplayName = resolveIncomingDisplayName(callerName, metadata)
         activeCallId = callId
         outgoingCallId = null
-        incomingCallerName = callerName
+        incomingCallerName = incomingDisplayName
         incomingHasVideo = hasVideo
         incomingMetadata = metadata
         startIncomingRingtone()
@@ -150,7 +151,7 @@ class IsometrikFlutterCallPlugin :
             "incomingCallReported",
             mapOf(
                 "callId" to callId,
-                "callerName" to callerName,
+                "callerName" to incomingDisplayName,
                 "hasVideo" to hasVideo,
                 "metadata" to metadata
             )
@@ -567,6 +568,24 @@ class IsometrikFlutterCallPlugin :
             raw.entries.associate { (k, v) -> (k?.toString() ?: "") to v }
         } else {
             emptyMap()
+        }
+    }
+
+    private fun resolveIncomingDisplayName(baseCallerName: String, metadata: Map<String, Any?>): String {
+        val isGroupCallFromMetadata = when (val raw = metadata["isGroupCall"]) {
+            is Boolean -> raw
+            is String -> raw.equals("true", ignoreCase = true) || raw == "1"
+            is Number -> raw.toInt() != 0
+            else -> false
+        }
+        val customType = metadata["customType"]?.toString()?.trim()?.lowercase() ?: ""
+        val isGroupByType = customType == "groupcall" || customType == "group_call"
+        val isGroupCall = isGroupCallFromMetadata || isGroupByType
+        if (!isGroupCall) return baseCallerName
+        return if (baseCallerName.contains("(Group)", ignoreCase = true)) {
+            baseCallerName
+        } else {
+            "$baseCallerName (Group)"
         }
     }
 

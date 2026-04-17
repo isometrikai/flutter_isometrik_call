@@ -1,3 +1,5 @@
+import '../models/models.dart' show IsometrikMeeting;
+
 /// API errors aligned with Swift `ISMCallAPIError` + HTTP layer.
 sealed class IsometrikApiError implements Exception {
   const IsometrikApiError();
@@ -69,4 +71,20 @@ final class IsometrikFailure<T> extends IsometrikResult<T> {
   }) {
     return failure(error);
   }
+}
+
+/// Convenience getters when you want to read common fields without switching
+/// on [IsometrikResult].
+///
+/// These return `null` when the result is a failure.
+extension IsometrikMeetingResultX on IsometrikResult<IsometrikMeeting> {
+  String? get meetingId => when(
+        success: (d) => d.meetingId,
+        failure: (_) => null,
+      );
+
+  String? get rtcToken => when(
+        success: (d) => d.rtcToken,
+        failure: (_) => null,
+      );
 }

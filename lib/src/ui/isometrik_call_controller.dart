@@ -59,6 +59,7 @@ class IsometrikCallController extends ChangeNotifier {
     IsometrikCallStatus initialStatus = IsometrikCallStatus.calling,
   }) : _status = initialStatus {
     _localVideoEnabled = hasVideo;
+    _speaker = hasVideo;
     _attach();
   }
 
@@ -68,6 +69,8 @@ class IsometrikCallController extends ChangeNotifier {
   final String? peerImageUrl;
   final bool isOutgoing;
   final bool preflightPermissionsOnInit;
+  bool get shouldBlurIncomingCallByDefault =>
+      !isOutgoing && sdk.blurIncomingUi;
 
   /// RTC token for LiveKit — set on creation (outgoing) or after accept API (incoming).
   String? rtcToken;
@@ -136,9 +139,11 @@ class IsometrikCallController extends ChangeNotifier {
 
   bool _muted = false;
   bool get isMuted => _muted;
+  bool _muteToggleInProgress = false;
 
   bool _speaker = false;
   bool get isSpeaker => _speaker;
+  bool _speakerToggleInProgress = false;
 
   // ---------------------------------------------------------------------------
   // Video controls
@@ -203,6 +208,7 @@ class IsometrikCallController extends ChangeNotifier {
 
   StreamSubscription<IsometrikRoutedMeetingEvent>? _mqttSub;
   StreamSubscription<IsometrikNativeCallEvent>? _nativeSub;
+  bool _endedCleanupStarted = false;
 
   // ---------------------------------------------------------------------------
   // Lifecycle
@@ -237,8 +243,25 @@ class IsometrikCallController extends ChangeNotifier {
         // Remote user published — our turn to connect & publish.
         _connectAndPublish();
       case IsometrikRoutedMeetingEnded():
-      case IsometrikRoutedMemberLeftOrRejected():
+        debugPrint('IsometrikCallController[$meetingId]: meeting ended');
         _setStatus(IsometrikCallStatus.ended);
+      case IsometrikRoutedMemberLeftOrRejected():
+        // Group-call safe behavior:
+        // - joinRequestReject means this local session cannot continue.
+        // - memberLeft should not end everyone; only end when this client left.
+        final action = e.meeting.meetingAction;
+        if (action == IsometrikMeetingAction.joinRequestReject ||
+            _isLocalMemberLeftEvent(e.meeting)) {
+          debugPrint(
+            'IsometrikCallController[$meetingId]: local leave/reject -> end call',
+          );
+          _setStatus(IsometrikCallStatus.ended);
+        } else {
+          debugPrint(
+            'IsometrikCallController[$meetingId]: remote participant left, keeping call active',
+          );
+          notifyListeners();
+        }
       case IsometrikRoutedVideoUpgradeRequest():
         _videoUpgradeRequest = e.meeting;
         notifyListeners();
@@ -256,16 +279,69 @@ class IsometrikCallController extends ChangeNotifier {
     }
   }
 
+  bool _isLocalMemberLeftEvent(IsometrikMeeting meeting) {
+    final localUserId = sdk.meetingRouterContext.currentUserId;
+    if (localUserId == null || localUserId.isEmpty) return false;
+    final actor = meeting.userId ??
+        meeting.senderId ??
+        meeting.createdBy ??
+        meeting.initiatorIdentifier;
+    return actor != null && actor == localUserId;
+  }
+
   void _onNativeEvent(IsometrikNativeCallEvent e) {
     if (e.type == 'callEnded') {
       _setStatus(IsometrikCallStatus.ended);
+      return;
+    }
+    if (e.type == 'muteUpdated') {
+      final dynamic rawMuted = e.payload['isMuted'];
+      if (rawMuted is! bool) return;
+      final eventCallId = (e.payload['callId'] as String?)?.trim();
+      if (eventCallId != null &&
+          eventCallId.isNotEmpty &&
+          eventCallId != meetingId) {
+        return;
+      }
+      if (_muted == rawMuted) return;
+      _muted = rawMuted;
+      notifyListeners();
+      final local = _liveKit.currentRoom?.localParticipant;
+      if (local != null) {
+        unawaited(
+          () async {
+            try {
+              await local.setMicrophoneEnabled(!_muted);
+            } catch (err) {
+              debugPrint('IsometrikCallController: native mute sync error: $err');
+            }
+          }(),
+        );
+      }
     }
   }
 
   void _setStatus(IsometrikCallStatus s) {
     if (_status == s || _status == IsometrikCallStatus.ended) return;
     _status = s;
+    if (s == IsometrikCallStatus.ended) {
+      unawaited(_cleanupAfterEnded());
+    }
     notifyListeners();
+  }
+
+  Future<void> _cleanupAfterEnded() async {
+    if (_endedCleanupStarted) return;
+    _endedCleanupStarted = true;
+    _isMinimized = false;
+    _tick?.cancel();
+    try {
+      await _liveKit.disconnect();
+    } catch (_) {}
+    // Idempotent on native side; safe for remote-ended and local-ended paths.
+    try {
+      await sdk.endNativeCall();
+    } catch (_) {}
   }
 
   /// Connect LiveKit room, call `startPublishing` API, start timer.
@@ -423,36 +499,59 @@ class IsometrikCallController extends ChangeNotifier {
 
   /// Toggle microphone mute.
   Future<void> toggleMute() async {
+    if (_muteToggleInProgress) return;
+    _muteToggleInProgress = true;
     _muted = !_muted;
-    try {
-      await sdk.native.setMute(_muted);
-    } catch (_) {}
-    final local = _liveKit.currentRoom?.localParticipant;
-    if (local != null) {
-      try {
-        await local.setMicrophoneEnabled(!_muted);
-      } catch (e) {
-        debugPrint('IsometrikCallController: toggleMute error: $e');
-      }
-    }
     notifyListeners();
+    try {
+      final local = _liveKit.currentRoom?.localParticipant;
+      if (local != null) {
+        try {
+          await local.setMicrophoneEnabled(!_muted);
+        } catch (e) {
+          debugPrint('IsometrikCallController: toggleMute error: $e');
+        }
+      } else {
+        // Fallback for pre-connect phase where only native side is active.
+        try {
+          await sdk.native.setMute(_muted);
+        } catch (_) {}
+      }
+    } finally {
+      _muteToggleInProgress = false;
+      notifyListeners();
+    }
+  }
+
+  Future<void> _applySpeakerRoute() async {
+    final room = _liveKit.currentRoom;
+    if (room != null) {
+      try {
+        // Keep a single source of truth for speaker route while media is active.
+        await room.setSpeakerOn(_speaker);
+      } catch (e) {
+        debugPrint('IsometrikCallController: applySpeakerRoute error: $e');
+      }
+      return;
+    }
+    // Fallback before LiveKit connects.
+    try {
+      await sdk.native.setSpeaker(_speaker);
+    } catch (_) {}
   }
 
   /// Toggle speaker / earpiece.
   Future<void> toggleSpeaker() async {
+    if (_speakerToggleInProgress) return;
+    _speakerToggleInProgress = true;
     _speaker = !_speaker;
-    try {
-      await sdk.native.setSpeaker(_speaker);
-    } catch (_) {}
-    final room = _liveKit.currentRoom;
-    if (room != null) {
-      try {
-        await room.setSpeakerOn(_speaker);
-      } catch (e) {
-        debugPrint('IsometrikCallController: toggleSpeaker error: $e');
-      }
-    }
     notifyListeners();
+    try {
+      await _applySpeakerRoute();
+    } finally {
+      _speakerToggleInProgress = false;
+      notifyListeners();
+    }
   }
 
   /// Enable/disable local camera stream without ending the call.
@@ -535,7 +634,7 @@ class IsometrikCallController extends ChangeNotifier {
       await sdk.endNativeCall();
     } catch (_) {}
     try {
-      await sdk.meetings.leaveMeeting(meetingId: meetingId);
+      await sdk.leaveMeetingOnce(meetingId);
     } catch (_) {}
   }
 
@@ -615,7 +714,7 @@ class IsometrikCallController extends ChangeNotifier {
     if (local == null || room == null) return;
     try {
       await local.setMicrophoneEnabled(!_muted);
-      await room.setSpeakerOn(_speaker);
+      await _applySpeakerRoute();
     } catch (e) {
       debugPrint('IsometrikCallController: syncLocalAudioState error: $e');
     }

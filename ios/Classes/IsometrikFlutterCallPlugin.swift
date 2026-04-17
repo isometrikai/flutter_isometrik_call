@@ -17,7 +17,8 @@ public class IsometrikFlutterCallPlugin: NSObject, FlutterPlugin, FlutterStreamH
     let config = CXProviderConfiguration(localizedName: "Isometrik Call")
     config.supportsVideo = true
     config.maximumCallGroups = 1
-    config.maximumCallsPerCallGroup = 1
+    // Allow call waiting while an active call exists (End & Accept flow).
+    config.maximumCallsPerCallGroup = 2
     config.supportedHandleTypes = [.generic]
     return CXProvider(configuration: config)
   }()
@@ -25,6 +26,7 @@ public class IsometrikFlutterCallPlugin: NSObject, FlutterPlugin, FlutterStreamH
   private var activeCallUUID: UUID?
   private var activeCallId: String?
   private var outgoingCallUUID: UUID?
+  private var callIdByUUID: [UUID: String] = [:]
   private var latestVoipToken: String?
   private var userId: String?
   private var userToken: String?
@@ -85,7 +87,9 @@ public class IsometrikFlutterCallPlugin: NSObject, FlutterPlugin, FlutterStreamH
         return
       }
       let hasVideo = args["hasVideo"] as? Bool ?? false
-      reportIncomingCall(callerName: callerName, callId: callId, hasVideo: hasVideo, metadata: args["metadata"] as? [String: Any] ?? [:], result: result)
+      let metadata = args["metadata"] as? [String: Any] ?? [:]
+      let displayName = resolvedIncomingDisplayName(baseCallerName: callerName, metadata: metadata)
+      reportIncomingCall(callerName: displayName, callId: callId, hasVideo: hasVideo, metadata: metadata, result: result)
     case "startOutgoingCall":
       let args = call.arguments as? [String: Any] ?? [:]
       guard let calleeName = args["calleeName"] as? String,
@@ -123,7 +127,9 @@ public class IsometrikFlutterCallPlugin: NSObject, FlutterPlugin, FlutterStreamH
 
   /// Mirrors `ISMCallManager.canMakeAOutgoingCall()`.
   private func canMakeOutgoingCall() -> Bool {
-    if callObserver.calls.contains(where: { $0.hasConnected || $0.isOutgoing }) {
+    // Ignore stale ended calls. Without this, iOS can keep historical calls in
+    // CXCallObserver briefly and Flutter incorrectly sees "already on call".
+    if callObserver.calls.contains(where: { !$0.hasEnded && ($0.hasConnected || $0.isOutgoing) }) {
       return false
     }
     return true
@@ -148,13 +154,14 @@ public class IsometrikFlutterCallPlugin: NSObject, FlutterPlugin, FlutterStreamH
       result(nil)
       return
     }
+    let connectedCallId = callIdForAction(uuid: outgoingCallUUID ?? activeCallUUID)
     if !isSimulatorEnvironment() {
       if let uuid = outgoingCallUUID ?? activeCallUUID {
         provider.reportOutgoingCall(with: uuid, connectedAt: Date())
       }
     }
     outgoingCallUUID = nil
-    sendEvent(type: "outgoingCallConnected", payload: ["callId": activeCallId as Any])
+    sendEvent(type: "outgoingCallConnected", payload: ["callId": connectedCallId as Any])
     result(nil)
   }
 
@@ -180,10 +187,30 @@ public class IsometrikFlutterCallPlugin: NSObject, FlutterPlugin, FlutterStreamH
     hangupWorkItem = nil
   }
 
+  private func callId(for uuid: UUID?) -> String? {
+    guard let uuid else { return nil }
+    return callIdByUUID[uuid]
+  }
+
+  private func callIdForAction(uuid: UUID?) -> String? {
+    guard let uuid else { return nil }
+    if let mapped = callIdByUUID[uuid] {
+      return mapped
+    }
+    // Never reuse activeCallId for a different UUID; that can misroute
+    // waiting-call End/Accept actions to the wrong meeting.
+    if activeCallUUID == uuid {
+      return activeCallId
+    }
+    return nil
+  }
+
   private func endCall(uuid: UUID, completion: (() -> Void)? = nil) {
+    let endedCallId = callIdForAction(uuid: uuid)
     if isSimulatorEnvironment() {
       _ = uuid
-      sendEvent(type: "callEnded", payload: ["callId": activeCallId as Any])
+      sendEvent(type: "callEnded", payload: ["callId": endedCallId as Any])
+      callIdByUUID[uuid] = nil
       activeCallUUID = nil
       activeCallId = nil
       outgoingCallUUID = nil
@@ -196,10 +223,15 @@ public class IsometrikFlutterCallPlugin: NSObject, FlutterPlugin, FlutterStreamH
       if error != nil {
         self?.provider.reportCall(with: uuid, endedAt: Date(), reason: .remoteEnded)
       }
-      self?.sendEvent(type: "callEnded", payload: ["callId": self?.activeCallId as Any])
-      self?.activeCallUUID = nil
-      self?.activeCallId = nil
-      self?.outgoingCallUUID = nil
+      self?.sendEvent(type: "callEnded", payload: ["callId": endedCallId as Any])
+      self?.callIdByUUID[uuid] = nil
+      if self?.activeCallUUID == uuid {
+        self?.activeCallUUID = nil
+        self?.activeCallId = nil
+      }
+      if self?.outgoingCallUUID == uuid {
+        self?.outgoingCallUUID = nil
+      }
       completion?()
     }
   }
@@ -225,6 +257,7 @@ public class IsometrikFlutterCallPlugin: NSObject, FlutterPlugin, FlutterStreamH
     // Simulator: skip CallKit UI; emit the same Dart events so the app can show in-app call UI.
     if isSimulatorEnvironment() {
       let uuid = UUID()
+      callIdByUUID[uuid] = callId
       activeCallUUID = uuid
       activeCallId = callId
       sendEvent(type: "incomingCallReported", payload: [
@@ -240,8 +273,10 @@ public class IsometrikFlutterCallPlugin: NSObject, FlutterPlugin, FlutterStreamH
     update.remoteHandle = CXHandle(type: .generic, value: callerName)
     update.hasVideo = hasVideo
     let uuid = UUID()
+    callIdByUUID[uuid] = callId
     provider.reportNewIncomingCall(with: uuid, update: update) { [weak self] error in
       if let error {
+        self?.callIdByUUID[uuid] = nil
         result(FlutterError(code: "callkit_error", message: error.localizedDescription, details: nil))
         return
       }
@@ -257,6 +292,29 @@ public class IsometrikFlutterCallPlugin: NSObject, FlutterPlugin, FlutterStreamH
     }
   }
 
+  private func resolvedIncomingDisplayName(
+    baseCallerName: String,
+    metadata: [String: Any]
+  ) -> String {
+    let isGroupFlag: Bool = {
+      if let v = metadata["isGroupCall"] as? Bool { return v }
+      if let v = metadata["isGroupCall"] as? Int { return v != 0 }
+      if let v = metadata["isGroupCall"] as? String {
+        let n = v.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        return n == "true" || n == "1"
+      }
+      return false
+    }()
+    let customType = (metadata["customType"] as? String)?
+      .trimmingCharacters(in: .whitespacesAndNewlines)
+      .lowercased() ?? ""
+    let isGroupByType = customType == "groupcall" || customType == "group_call"
+    let isGroupCall = isGroupFlag || isGroupByType
+    if !isGroupCall { return baseCallerName }
+    if baseCallerName.localizedCaseInsensitiveContains("(Group)") { return baseCallerName }
+    return "\(baseCallerName) (Group)"
+  }
+
   private func startOutgoingCall(
     calleeName: String,
     callId: String,
@@ -267,6 +325,7 @@ public class IsometrikFlutterCallPlugin: NSObject, FlutterPlugin, FlutterStreamH
     // Simulator: skip CallKit transactions; keep state + events aligned with device so Flutter can open call UI.
     if isSimulatorEnvironment() {
       let uuid = UUID()
+      callIdByUUID[uuid] = callId
       activeCallUUID = uuid
       outgoingCallUUID = uuid
       activeCallId = callId
@@ -284,8 +343,10 @@ public class IsometrikFlutterCallPlugin: NSObject, FlutterPlugin, FlutterStreamH
     let action = CXStartCallAction(call: uuid, handle: handle)
     action.isVideo = hasVideo
     let transaction = CXTransaction(action: action)
+    callIdByUUID[uuid] = callId
     callController.request(transaction) { [weak self] error in
       if let error {
+        self?.callIdByUUID[uuid] = nil
         result(FlutterError(code: "callkit_error", message: error.localizedDescription, details: nil))
         return
       }
@@ -327,12 +388,11 @@ public class IsometrikFlutterCallPlugin: NSObject, FlutterPlugin, FlutterStreamH
     }
     let action = CXSetMutedCallAction(call: uuid, muted: isMuted)
     let transaction = CXTransaction(action: action)
-    callController.request(transaction) { [weak self] error in
+    callController.request(transaction) { error in
       if let error {
         result(FlutterError(code: "callkit_error", message: error.localizedDescription, details: nil))
         return
       }
-      self?.sendEvent(type: "muteUpdated", payload: ["isMuted": isMuted, "callId": self?.activeCallId as Any])
       result(nil)
     }
   }
@@ -390,25 +450,47 @@ extension IsometrikFlutterCallPlugin: PKPushRegistryDelegate {
 
 extension IsometrikFlutterCallPlugin: CXProviderDelegate {
   public func providerDidReset(_ provider: CXProvider) {
+    callIdByUUID.removeAll()
     activeCallUUID = nil
     activeCallId = nil
+    outgoingCallUUID = nil
     sendEvent(type: "providerReset", payload: [:])
   }
 
   public func provider(_ provider: CXProvider, perform action: CXAnswerCallAction) {
-    sendEvent(type: "callAnswered", payload: ["callId": activeCallId as Any])
+    let answeredCallId = callIdForAction(uuid: action.callUUID)
+    activeCallUUID = action.callUUID
+    activeCallId = answeredCallId
+    sendEvent(type: "callAnswered", payload: ["callId": answeredCallId as Any])
     action.fulfill()
   }
 
   public func provider(_ provider: CXProvider, perform action: CXEndCallAction) {
-    sendEvent(type: "callEnded", payload: ["callId": activeCallId as Any])
-    activeCallUUID = nil
-    activeCallId = nil
+    let endedCallId = callIdForAction(uuid: action.callUUID)
+    sendEvent(type: "callEnded", payload: ["callId": endedCallId as Any])
+    callIdByUUID[action.callUUID] = nil
+    if activeCallUUID == action.callUUID {
+      activeCallUUID = nil
+      activeCallId = nil
+    }
+    if outgoingCallUUID == action.callUUID {
+      outgoingCallUUID = nil
+    }
     action.fulfill()
   }
 
   public func provider(_ provider: CXProvider, perform action: CXStartCallAction) {
-    sendEvent(type: "callConnecting", payload: ["callId": activeCallId as Any])
+    let connectingCallId = callIdForAction(uuid: action.callUUID)
+    sendEvent(type: "callConnecting", payload: ["callId": connectingCallId as Any])
+    action.fulfill()
+  }
+
+  public func provider(_ provider: CXProvider, perform action: CXSetMutedCallAction) {
+    let mutedCallId = callIdForAction(uuid: action.callUUID)
+    sendEvent(type: "muteUpdated", payload: [
+      "isMuted": action.isMuted,
+      "callId": mutedCallId as Any,
+    ])
     action.fulfill()
   }
 }

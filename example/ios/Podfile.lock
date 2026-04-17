@@ -15,6 +15,9 @@ PODS:
     - Flutter
     - flutter_webrtc
     - WebRTC-SDK (= 137.7151.04)
+  - path_provider_foundation (0.0.1):
+    - Flutter
+    - FlutterMacOS
   - permission_handler_apple (9.3.0):
     - Flutter
   - shared_preferences_foundation (0.0.1):
@@ -30,6 +33,7 @@ DEPENDENCIES:
   - integration_test (from `.symlinks/plugins/integration_test/ios`)
   - isometrik_flutter_call (from `.symlinks/plugins/isometrik_flutter_call/ios`)
   - livekit_client (from `.symlinks/plugins/livekit_client/ios`)
+  - path_provider_foundation (from `.symlinks/plugins/path_provider_foundation/darwin`)
   - permission_handler_apple (from `.symlinks/plugins/permission_handler_apple/ios`)
   - shared_preferences_foundation (from `.symlinks/plugins/shared_preferences_foundation/darwin`)
 
@@ -52,21 +56,24 @@ EXTERNAL SOURCES:
     :path: ".symlinks/plugins/isometrik_flutter_call/ios"
   livekit_client:
     :path: ".symlinks/plugins/livekit_client/ios"
+  path_provider_foundation:
+    :path: ".symlinks/plugins/path_provider_foundation/darwin"
   permission_handler_apple:
     :path: ".symlinks/plugins/permission_handler_apple/ios"
   shared_preferences_foundation:
     :path: ".symlinks/plugins/shared_preferences_foundation/darwin"
 
 SPEC CHECKSUMS:
-  connectivity_plus: cb623214f4e1f6ef8fe7403d580fdad517d2f7dd
-  device_info_plus: 21fcca2080fbcd348be798aa36c3e5ed849eefbe
+  connectivity_plus: 2a701ffec2c0ae28a48cf7540e279787e77c447d
+  device_info_plus: bf2e3232933866d73fe290f2942f2156cdd10342
   Flutter: cabc95a1d2626b1b06e7179b784ebcf0c0cde467
-  flutter_webrtc: c3e21fc0dcd9d8eb246ae4d5256fcbeb2f5ecd22
-  integration_test: 4a889634ef21a45d28d50d622cf412dc6d9f586e
-  isometrik_flutter_call: 1580f0512d98a888f5ac7d861e032cbfffa5dea4
-  livekit_client: 53ca658779b78710fb458cccee28b53a13356c15
-  permission_handler_apple: 4ed2196e43d0651e8ff7ca3483a069d469701f2d
-  shared_preferences_foundation: 7036424c3d8ec98dfe75ff1667cb0cd531ec82bb
+  flutter_webrtc: 2f8c283dc8d16b988cdf8b0a7248b0717829bd78
+  integration_test: 252f60fa39af5e17c3aa9899d35d908a0721b573
+  isometrik_flutter_call: 2e88a2efa45bc9bea4cad916437b189ef171aa3e
+  livekit_client: 731005aa855cceb1335d024c53da46f99ab67c2f
+  path_provider_foundation: 0b743cbb62d8e47eab856f09262bb8c1ddcfe6ba
+  permission_handler_apple: 9878588469a2b0d0fc1e048d9f43605f92e6cec2
+  shared_preferences_foundation: 5086985c1d43c5ba4d5e69a4e8083a389e2909e6
   WebRTC-SDK: 40d4f5ba05cadff14e4db5614aec402a633f007e
 
 PODFILE CHECKSUM: 8a8f9b2cf7f0af8aed5315bcb07fafbec44d862c
