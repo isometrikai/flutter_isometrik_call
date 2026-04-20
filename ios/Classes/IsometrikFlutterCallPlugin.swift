@@ -418,51 +418,55 @@ public class IsometrikFlutterCallPlugin: NSObject, FlutterPlugin, FlutterStreamH
   private func sendEvent(type: String, payload: [String: Any]) {
     eventSink?(["type": type, "payload": payload])
   }
-}
 
-extension IsometrikFlutterCallPlugin: PKPushRegistryDelegate {
-  public func pushRegistry(_ registry: PKPushRegistry, didUpdate pushCredentials: PKPushCredentials, for type: PKPushType) {
-    guard type == .voIP else { return }
-    let token = pushCredentials.token.map { String(format: "%02.2hhx", $0) }.joined()
-    latestVoipToken = token
-    sendEvent(type: "voipTokenUpdated", payload: [
-      "token": token,
-      "userId": userId as Any,
-      "hasSession": userToken != nil,
-    ])
-  }
+  /// Last-resort timeout only if `reportNewIncomingCall` never runs its completion (should be rare).
+  /// Must be long enough not to beat CallKit on a slow / locked-device cold start.
+  private static let voipPushKitCompletionFallbackSeconds: TimeInterval = 5.0
 
-  public func pushRegistry(_ registry: PKPushRegistry, didInvalidatePushTokenFor type: PKPushType) {
-    guard type == .voIP else { return }
-    latestVoipToken = nil
-    sendEvent(type: "voipTokenInvalidated", payload: [:])
-  }
-
-  public func pushRegistry(
-    _ registry: PKPushRegistry,
-    didReceiveIncomingPushWith payload: PKPushPayload,
-    for type: PKPushType,
-    completion: @escaping () -> Void
+  /// PushKit: Apple requires `completion` to be called exactly once per VoIP push after handling.
+  /// We complete immediately after CallKit’s `reportNewIncomingCall` callback (not after Flutter events).
+  private func handleIncomingVoipPush(
+    payload: PKPushPayload,
+    pushCompletion: @escaping () -> Void
   ) {
-    guard type == .voIP else {
-      completion()
-      return
-    }
     let payloadData = payload.dictionaryPayload
+    let pushReceivedMono = CFAbsoluteTimeGetCurrent()
+    let traceCallId =
+      payloadData["callId"] as? String ?? payloadData["meetingId"] as? String ?? "?"
+    NSLog(
+      "[ISMCall] VoIP push handling on main=%@ callId=%@",
+      Thread.isMainThread ? "yes" : "no",
+      traceCallId
+    )
 
+    var voipPushCompletionTimeout: DispatchWorkItem?
     var completed = false
-    let completeOnce: () -> Void = {
+    let completeVoipPushOnce: () -> Void = {
       if completed { return }
       completed = true
-      completion()
-    }
-    DispatchQueue.main.asyncAfter(deadline: .now() + 3) {
-      completeOnce()
+      voipPushCompletionTimeout?.cancel()
+      voipPushCompletionTimeout = nil
+      let elapsed = CFAbsoluteTimeGetCurrent() - pushReceivedMono
+      NSLog("[ISMCall] VoIP PushKit completion() after %.4fs (must be once)", elapsed)
+      pushCompletion()
     }
 
+    let timeout = DispatchWorkItem {
+      NSLog(
+        "[ISMCall] VoIP PushKit completion FALLBACK — reportNewIncomingCall did not complete within %.0fs (complete anyway so iOS does not hang)",
+        Self.voipPushKitCompletionFallbackSeconds
+      )
+      completeVoipPushOnce()
+    }
+    voipPushCompletionTimeout = timeout
+    DispatchQueue.main.asyncAfter(
+      deadline: .now() + Self.voipPushKitCompletionFallbackSeconds,
+      execute: timeout
+    )
+
     if isSimulatorEnvironment() {
+      completeVoipPushOnce()
       sendEvent(type: "incomingVoipPush", payload: ["payload": payloadData])
-      completeOnce()
       return
     }
 
@@ -500,9 +504,12 @@ extension IsometrikFlutterCallPlugin: PKPushRegistryDelegate {
     activeCallId = callId
     nativeCallKitReported = true
 
+    let reportStart = CFAbsoluteTimeGetCurrent()
     provider.reportNewIncomingCall(with: uuid, update: update) { [weak self] error in
+      let reportElapsed = CFAbsoluteTimeGetCurrent() - reportStart
+      NSLog("[ISMCall] reportNewIncomingCall finished in %.4fs", reportElapsed)
       guard let self else {
-        completeOnce()
+        completeVoipPushOnce()
         return
       }
       if let error {
@@ -513,6 +520,7 @@ extension IsometrikFlutterCallPlugin: PKPushRegistryDelegate {
           self.activeCallUUID = nil
           self.activeCallId = nil
         }
+        completeVoipPushOnce()
         self.sendEvent(type: "incomingVoipPush", payload: [
           "payload": payloadData,
           "callId": callId,
@@ -520,17 +528,63 @@ extension IsometrikFlutterCallPlugin: PKPushRegistryDelegate {
           "hasVideo": hasVideo,
           "callkitError": error.localizedDescription,
         ])
-        completeOnce()
         return
       }
 
+      completeVoipPushOnce()
       self.sendEvent(type: "incomingVoipPush", payload: [
         "payload": payloadData,
         "callId": callId,
         "callerName": callerName,
         "hasVideo": hasVideo,
       ])
-      completeOnce()
+    }
+  }
+}
+
+extension IsometrikFlutterCallPlugin: PKPushRegistryDelegate {
+  public func pushRegistry(_ registry: PKPushRegistry, didUpdate pushCredentials: PKPushCredentials, for type: PKPushType) {
+    guard type == .voIP else { return }
+    let token = pushCredentials.token.map { String(format: "%02.2hhx", $0) }.joined()
+    latestVoipToken = token
+    sendEvent(type: "voipTokenUpdated", payload: [
+      "token": token,
+      "userId": userId as Any,
+      "hasSession": userToken != nil,
+    ])
+  }
+
+  public func pushRegistry(_ registry: PKPushRegistry, didInvalidatePushTokenFor type: PKPushType) {
+    guard type == .voIP else { return }
+    latestVoipToken = nil
+    sendEvent(type: "voipTokenInvalidated", payload: [:])
+  }
+
+  public func pushRegistry(
+    _ registry: PKPushRegistry,
+    didReceiveIncomingPushWith payload: PKPushPayload,
+    for type: PKPushType,
+    completion: @escaping () -> Void
+  ) {
+    guard type == .voIP else {
+      completion()
+      return
+    }
+    // CallKit must run on the main queue. Funnel here so PushKit always reaches `handleIncomingVoipPush`
+    // on main (background / locked wake may call the delegate off-main depending on OS behavior).
+    let run: () -> Void = { [weak self] in
+      guard let self else {
+        NSLog("[ISMCall] VoIP push: plugin deallocated before handling — completing PushKit to satisfy API contract")
+        completion()
+        return
+      }
+      self.handleIncomingVoipPush(payload: payload, pushCompletion: completion)
+    }
+    if Thread.isMainThread {
+      run()
+    } else {
+      NSLog("[ISMCall] VoIP push: delegate off main — async to main for CallKit")
+      DispatchQueue.main.async(execute: run)
     }
   }
 }
