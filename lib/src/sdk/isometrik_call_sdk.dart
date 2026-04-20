@@ -871,7 +871,14 @@ class IsometrikCallSdk {
   }
 
   /// Report CallKit incoming UI from decoded PushKit / MQTT payload — mirrors `reportIncomingCall(callDetails:)`.
-  Future<void> reportIncomingCallFromMeeting(IsometrikMeeting meeting) async {
+  ///
+  /// When [skipNativeCallKitReport] is true (iOS PushKit already reported to CallKit),
+  /// skips [native.reportIncomingCall] but still runs hangup scheduling and MQTT
+  /// `callRinging` publish so behavior matches the Dart-initiated path.
+  Future<void> reportIncomingCallFromMeeting(
+    IsometrikMeeting meeting, {
+    bool skipNativeCallKitReport = false,
+  }) async {
     final mid = meeting.meetingId?.trim();
     if (mid == null || mid.isEmpty) {
       debugPrint(
@@ -972,15 +979,17 @@ class IsometrikCallSdk {
     meetingRouterContext.nativeCallActive = true;
     meetingRouterContext.callAnsweredByDeviceId = null;
     try {
-      await native.reportIncomingCall(
-        callerName: _resolveIncomingCallerName(meeting: meeting),
-        callId: mid,
-        hasVideo: meeting.callType != IsometrikLiveCallType.audioCall,
-        metadata: <String, dynamic>{
-          ...meeting.toJson(),
-          'isGroupCall': _isGroupCall(primary: meeting),
-        },
-      );
+      if (!skipNativeCallKitReport) {
+        await native.reportIncomingCall(
+          callerName: _resolveIncomingCallerName(meeting: meeting),
+          callId: mid,
+          hasVideo: meeting.callType != IsometrikLiveCallType.audioCall,
+          metadata: <String, dynamic>{
+            ...meeting.toJson(),
+            'isGroupCall': _isGroupCall(primary: meeting),
+          },
+        );
+      }
       final cfg = session.configuration;
       if (cfg != null) {
         await native.scheduleHangup(
@@ -1295,9 +1304,20 @@ class IsometrikCallSdk {
   Future<void> _handleAutoNativeEvent(IsometrikNativeCallEvent e) async {
     if (e.type == 'incomingVoipPush') {
       final meeting = _meetingFromIncomingVoipNativeEvent(e);
-      if (meeting != null) {
-        await reportIncomingCallFromMeeting(meeting);
+      if (meeting == null) {
+        if (defaultTargetPlatform == TargetPlatform.iOS) {
+          await native.wasCallKitReportedNatively();
+        }
+        return;
       }
+      var skipNativeCallKit = false;
+      if (defaultTargetPlatform == TargetPlatform.iOS) {
+        skipNativeCallKit = await native.wasCallKitReportedNatively();
+      }
+      await reportIncomingCallFromMeeting(
+        meeting,
+        skipNativeCallKitReport: skipNativeCallKit,
+      );
     } else if (e.type == 'providerReset') {
       try {
         await native.cancelScheduledHangup();

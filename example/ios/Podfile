@@ -28,7 +28,11 @@ require File.expand_path(File.join('packages', 'flutter_tools', 'bin', 'podhelpe
 flutter_ios_podfile_setup
 
 target 'Runner' do
-  use_frameworks!
+  # Dynamic frameworks + Flutter embedded native assets (e.g. objective_c.framework)
+  # often fail device install with 0xe8008014 (invalid signature). Static linkage avoids
+  # shipping those as separate signed dynamic frameworks; flutter_webrtc uses
+  # static_framework in its podspec.
+  use_frameworks! :linkage => :static
 
   flutter_install_all_ios_pods File.dirname(File.realpath(__FILE__))
   target 'RunnerTests' do

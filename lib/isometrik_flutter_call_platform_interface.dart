@@ -99,6 +99,14 @@ abstract class IsometrikFlutterCallPlatform extends PlatformInterface {
     );
   }
 
+  /// iOS: whether PushKit already reported the incoming call to CallKit for the
+  /// current VoIP push. Reading clears the latch on native. Other platforms: false.
+  Future<bool> wasCallKitReportedNatively() {
+    throw UnimplementedError(
+      'wasCallKitReportedNatively() has not been implemented.',
+    );
+  }
+
   /// Android runtime permissions request (camera / microphone).
   Future<Map<String, dynamic>> requestRuntimePermissions({
     required bool requestMicrophone,

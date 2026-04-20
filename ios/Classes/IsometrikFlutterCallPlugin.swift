@@ -33,6 +33,9 @@ public class IsometrikFlutterCallPlugin: NSObject, FlutterPlugin, FlutterStreamH
   private var configuration: [String: Any] = [:]
   private let callObserver = CXCallObserver()
   private var hangupWorkItem: DispatchWorkItem?
+  /// True when PushKit path already called `reportNewIncomingCall` for this VoIP push.
+  /// Dart reads via `wasCallKitReportedNatively` to avoid duplicate CallKit UI.
+  private var nativeCallKitReported: Bool = false
 
   public static func register(with registrar: FlutterPluginRegistrar) {
     let methodChannel = FlutterMethodChannel(
@@ -120,6 +123,9 @@ public class IsometrikFlutterCallPlugin: NSObject, FlutterPlugin, FlutterStreamH
     case "cancelScheduledHangup":
       cancelScheduledHangup()
       result(nil)
+    case "wasCallKitReportedNatively":
+      result(nativeCallKitReported)
+      nativeCallKitReported = false
     default:
       result(FlutterMethodNotImplemented)
     }
@@ -443,13 +449,95 @@ extension IsometrikFlutterCallPlugin: PKPushRegistryDelegate {
       return
     }
     let payloadData = payload.dictionaryPayload
-    sendEvent(type: "incomingVoipPush", payload: ["payload": payloadData])
-    completion()
+
+    var completed = false
+    let completeOnce: () -> Void = {
+      if completed { return }
+      completed = true
+      completion()
+    }
+    DispatchQueue.main.asyncAfter(deadline: .now() + 3) {
+      completeOnce()
+    }
+
+    if isSimulatorEnvironment() {
+      sendEvent(type: "incomingVoipPush", payload: ["payload": payloadData])
+      completeOnce()
+      return
+    }
+
+    let callerName: String = {
+      if let v = payloadData["callerName"] as? String, !v.isEmpty { return v }
+      if let v = payloadData["caller_name"] as? String, !v.isEmpty { return v }
+      if let v = payloadData["name"] as? String, !v.isEmpty { return v }
+      if let v = payloadData["displayName"] as? String, !v.isEmpty { return v }
+      return "Incoming Call"
+    }()
+
+    let callId: String = {
+      if let v = payloadData["callId"] as? String, !v.isEmpty { return v }
+      if let v = payloadData["call_id"] as? String, !v.isEmpty { return v }
+      if let v = payloadData["meetingId"] as? String, !v.isEmpty { return v }
+      return UUID().uuidString
+    }()
+
+    let hasVideo: Bool = {
+      if let v = payloadData["hasVideo"] as? Bool { return v }
+      if let v = payloadData["has_video"] as? Bool { return v }
+      if let v = payloadData["isVideo"] as? Bool { return v }
+      if let v = payloadData["hasVideo"] as? Int { return v != 0 }
+      return false
+    }()
+
+    let uuid = UUID()
+    let update = CXCallUpdate()
+    update.remoteHandle = CXHandle(type: .generic, value: callerName)
+    update.hasVideo = hasVideo
+    update.localizedCallerName = callerName
+
+    callIdByUUID[uuid] = callId
+    activeCallUUID = uuid
+    activeCallId = callId
+    nativeCallKitReported = true
+
+    provider.reportNewIncomingCall(with: uuid, update: update) { [weak self] error in
+      guard let self else {
+        completeOnce()
+        return
+      }
+      if let error {
+        self.nativeCallKitReported = false
+        NSLog("[ISMCall] CallKit rejected VoIP incoming call: \(error.localizedDescription)")
+        self.callIdByUUID[uuid] = nil
+        if self.activeCallUUID == uuid {
+          self.activeCallUUID = nil
+          self.activeCallId = nil
+        }
+        self.sendEvent(type: "incomingVoipPush", payload: [
+          "payload": payloadData,
+          "callId": callId,
+          "callerName": callerName,
+          "hasVideo": hasVideo,
+          "callkitError": error.localizedDescription,
+        ])
+        completeOnce()
+        return
+      }
+
+      self.sendEvent(type: "incomingVoipPush", payload: [
+        "payload": payloadData,
+        "callId": callId,
+        "callerName": callerName,
+        "hasVideo": hasVideo,
+      ])
+      completeOnce()
+    }
   }
 }
 
 extension IsometrikFlutterCallPlugin: CXProviderDelegate {
   public func providerDidReset(_ provider: CXProvider) {
+    nativeCallKitReported = false
     callIdByUUID.removeAll()
     activeCallUUID = nil
     activeCallId = nil

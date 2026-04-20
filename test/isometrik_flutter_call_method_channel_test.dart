@@ -31,4 +31,15 @@ void main() {
       'projectId': 'test-project',
     });
   });
+
+  test('wasCallKitReportedNatively delegates to method channel', () async {
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(channel, (MethodCall methodCall) async {
+          log.add(methodCall);
+          return true;
+        });
+    final v = await platform.wasCallKitReportedNatively();
+    expect(v, isTrue);
+    expect(log.single.method, 'wasCallKitReportedNatively');
+  });
 }

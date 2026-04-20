@@ -1,3 +1,5 @@
+import 'package:flutter/services.dart';
+
 import '../../isometrik_flutter_call_platform_interface.dart';
 import '../configuration/isometrik_call_configuration.dart';
 
@@ -117,6 +119,22 @@ class IsometrikFlutterCall {
 
   Future<void> cancelScheduledHangup() {
     return IsometrikFlutterCallPlatform.instance.cancelScheduledHangup();
+  }
+
+  /// iOS PushKit path may already show CallKit; returns whether to skip Dart-initiated
+  /// [reportIncomingCall]. Safe on all platforms (false when unsupported).
+  Future<bool> wasCallKitReportedNatively() async {
+    try {
+      return await IsometrikFlutterCallPlatform.instance
+          .wasCallKitReportedNatively();
+    } on MissingPluginException {
+      return false;
+    } on PlatformException catch (e) {
+      if (e.code == 'channel-error' || e.code == 'not-implemented') {
+        return false;
+      }
+      return false;
+    }
   }
 
   Future<Map<String, dynamic>> requestRuntimePermissions({

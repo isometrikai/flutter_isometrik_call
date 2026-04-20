@@ -122,6 +122,10 @@ class IsometrikFlutterCallPlugin :
                 result.success(true)
             }
 
+            "wasCallKitReportedNatively" -> {
+                result.success(false)
+            }
+
             "requestRuntimePermissions" -> {
                 handleRequestRuntimePermissions(call, result)
             }

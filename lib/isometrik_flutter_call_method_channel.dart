@@ -111,6 +111,16 @@ class MethodChannelIsometrikFlutterCall extends IsometrikFlutterCallPlatform {
   }
 
   @override
+  Future<bool> wasCallKitReportedNatively() async {
+    final dynamic r = await methodChannel.invokeMethod<dynamic>(
+      'wasCallKitReportedNatively',
+    );
+    if (r is bool) return r;
+    if (r is num) return r != 0;
+    return false;
+  }
+
+  @override
   Future<Map<String, dynamic>> requestRuntimePermissions({
     required bool requestMicrophone,
     required bool requestCamera,
