@@ -9,11 +9,21 @@ import '../configuration/isometrik_call_configuration.dart';
 import '../models/models.dart';
 
 /// Mirrors Swift `ISMMQTTManager` + `handleTheMeetingEvents` decoding.
+///
+/// **Dependencies:** this file uses `mqtt_client` types from
+/// `package:mqtt_client/mqtt_client.dart` (e.g. [MqttQos], [MqttMessage]) and
+/// [MqttServerClient] from `package:mqtt_client/mqtt_server_client.dart`. The
+/// server library does not re-export those base types, so both imports are
+/// required. If analysis reports unknown MQTT types (e.g. `MqttReceivedMessage`),
+/// run `flutter pub get` from the **plugin root** (`flutter_isometrik_call/`);
+/// the root `pubspec.lock` is gitignored, so the resolver needs a local fetch.
 class IsometrikMqttService {
   IsometrikMqttService();
 
   MqttServerClient? _client;
-  StreamSubscription<List<MqttReceivedMessage<MqttMessage>>>? _updatesSub;
+  // Omit generics so a stale analyzer (before `pub get`) does not fail on
+  // `MqttReceivedMessage` / `MqttMessage`; the stream still types the listener.
+  StreamSubscription? _updatesSub;
   String _userClientId = '';
   IsometrikCallConfiguration? _config;
   final StreamController<IsometrikMeeting> _meetingController =
@@ -63,9 +73,7 @@ class IsometrikMqttService {
     client.subscribe(statusTopic, MqttQos.atMostOnce);
     hasConnected = true;
 
-    _updatesSub = client.updates?.listen((
-      List<MqttReceivedMessage<MqttMessage>> events,
-    ) {
+    _updatesSub = client.updates?.listen((events) {
       if (events.isEmpty) {
         return;
       }

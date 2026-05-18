@@ -99,6 +99,14 @@ abstract class IsometrikFlutterCallPlatform extends PlatformInterface {
     );
   }
 
+  /// iOS only: run WebRTC/LiveKit-friendly audio session reactivation (synthetic interruption
+  /// cycle). No-op on other platforms. Safe to call after the LiveKit room connects.
+  Future<void> reactivateIosCallAudioSession({bool hasVideo = false}) {
+    throw UnimplementedError(
+      'reactivateIosCallAudioSession() has not been implemented.',
+    );
+  }
+
   /// iOS: whether PushKit already reported the incoming call to CallKit for the
   /// current VoIP push. Reading clears the latch on native. Other platforms: false.
   Future<bool> wasCallKitReportedNatively() {
@@ -119,5 +127,20 @@ abstract class IsometrikFlutterCallPlatform extends PlatformInterface {
 
   Stream<Map<String, dynamic>> events() {
     throw UnimplementedError('events() has not been implemented.');
+  }
+
+  /// iOS: persisted ring buffer for last VoIP / CallKit outcomes (survives app restart).
+  /// Other platforms return an empty list.
+  Future<List<Map<String, dynamic>>> getIosPushKitDiagnostics() {
+    throw UnimplementedError(
+      'getIosPushKitDiagnostics() has not been implemented.',
+    );
+  }
+
+  /// iOS only: clears [getIosPushKitDiagnostics] storage. No-op elsewhere.
+  Future<void> clearIosPushKitDiagnostics() {
+    throw UnimplementedError(
+      'clearIosPushKitDiagnostics() has not been implemented.',
+    );
   }
 }

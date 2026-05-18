@@ -83,7 +83,9 @@ class IsometrikMeeting {
       json['initiatorName'] ??
           json['initiatorUserName'] ??
           json['createdByName'] ??
-          json['callerName'],
+          json['callerName'] ??
+          json['userName'] ??
+          json['memberName'],
     );
     final initiatorIdentifier = asString(
       json['initiatorIdentifier'] ?? json['initiatorId'] ?? json['callerId'],

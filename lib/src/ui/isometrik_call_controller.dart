@@ -46,6 +46,12 @@ enum IsometrikCallStatus {
 /// for its [meetingId] and updates status accordingly. It also manages
 /// the LiveKit connection and REST `startPublishing` call when the call
 /// becomes [IsometrikCallStatus.connected].
+///
+/// **Locked / background / terminated (iOS):** CallKit activates `AVAudioSession`
+/// before Flutter finishes connecting; we listen for `callAudioSessionActivated`,
+/// post-connect reactivation, deferred recovery passes, **`iosAppBecameActive`** (native
+/// `UIApplication.didBecomeActiveNotification`), and [refreshIosAudioAfterAppForegrounded]
+/// from the call UI / minimized overlay so mic + speaker recover after unlock.
 class IsometrikCallController extends ChangeNotifier {
   IsometrikCallController({
     required this.sdk,
@@ -210,6 +216,9 @@ class IsometrikCallController extends ChangeNotifier {
   StreamSubscription<IsometrikNativeCallEvent>? _nativeSub;
   bool _endedCleanupStarted = false;
 
+  /// Dedupes overlapping [refreshIosAudioAfterAppForegrounded] / `iosAppBecameActive` bursts.
+  DateTime? _lastIosForegroundAudioRefresh;
+
   // ---------------------------------------------------------------------------
   // Lifecycle
   // ---------------------------------------------------------------------------
@@ -229,6 +238,13 @@ class IsometrikCallController extends ChangeNotifier {
     // Incoming-accepted: immediately start connecting media.
     if (_status == IsometrikCallStatus.connecting) {
       _connectAndPublish();
+    }
+
+    // iOS / incoming: CallKit may activate AVAudioSession before our EventChannel
+    // listener is attached (PushKit terminated wake). Mirrors `callAudioSessionActivated`.
+    // Outgoing uses the same event once media connects; skip avoid redundant polling.
+    if (defaultTargetPlatform == TargetPlatform.iOS && !isOutgoing) {
+      unawaited(_iosAudioRecoveryWhenCallKitSessionReady());
     }
   }
 
@@ -294,15 +310,35 @@ class IsometrikCallController extends ChangeNotifier {
       _setStatus(IsometrikCallStatus.ended);
       return;
     }
+    // iOS CallKit: session activates before LiveKit may have connected (cold wake). Poll until the
+    // room exists, then run the same recovery as post-connect (synthetic interruption + LiveKit route).
+    if (e.type == 'callAudioSessionActivated') {
+      if (defaultTargetPlatform == TargetPlatform.iOS) {
+        unawaited(_iosAudioRecoveryWhenCallKitSessionReady());
+      } else if (_liveKit.currentRoom != null) {
+        unawaited(_syncLocalAudioState());
+      }
+      return;
+    }
+    // iOS: every unlock / resume — works when [IsometrikCallPage] has no lifecycle
+    // (minimized PiP) or events race PushKit cold-start (terminated → answer).
+    if (e.type == 'iosAppBecameActive') {
+      if (defaultTargetPlatform == TargetPlatform.iOS) {
+        unawaited(refreshIosAudioAfterAppForegrounded());
+      }
+      return;
+    }
     if (e.type == 'muteUpdated') {
       final dynamic rawMuted = e.payload['isMuted'];
       if (rawMuted is! bool) return;
       final eventCallId = (e.payload['callId'] as String?)?.trim();
+      // When native includes a scoped id (almost always does), reject cross-talk.
       if (eventCallId != null &&
           eventCallId.isNotEmpty &&
           eventCallId != meetingId) {
         return;
       }
+      if (_muteToggleInProgress) return;
       if (_muted == rawMuted) return;
       _muted = rawMuted;
       notifyListeners();
@@ -314,6 +350,36 @@ class IsometrikCallController extends ChangeNotifier {
               await local.setMicrophoneEnabled(!_muted);
             } catch (err) {
               debugPrint('IsometrikCallController: native mute sync error: $err');
+            }
+          }(),
+        );
+      }
+      return;
+    }
+    // Android forwards this after setSpeaker; iOS emits when route changes from native.
+    if (e.type == 'speakerUpdated') {
+      final dynamic raw = e.payload['isSpeakerOn'];
+      if (raw is! bool) return;
+      final eventCallId = (e.payload['callId'] as String?)?.trim();
+      if (eventCallId != null &&
+          eventCallId.isNotEmpty &&
+          eventCallId != meetingId) {
+        return;
+      }
+      if (_speakerToggleInProgress) return;
+      if (_speaker == raw) return;
+      _speaker = raw;
+      notifyListeners();
+      final room = _liveKit.currentRoom;
+      if (room != null) {
+        unawaited(
+          () async {
+            try {
+              await room.setSpeakerOn(_speaker);
+            } catch (err) {
+              debugPrint(
+                'IsometrikCallController: speakerUpdated → LiveKit error: $err',
+              );
             }
           }(),
         );
@@ -370,9 +436,24 @@ class IsometrikCallController extends ChangeNotifier {
     final url = sdk.configuration?.streamingUrl;
     if (token != null && token.isNotEmpty && url != null) {
       try {
-        await _liveKit.connect(url: url, token: token);
+        await _liveKit.connect(
+          url: url,
+          token: token,
+          fastPublishCamera: hasVideo,
+        );
+        // Outgoing callers: CallKit occasionally reports mute before tracks exist;
+        // default LiveKit mute flag to match in-app UX (mic on) before we sync routes.
+        if (isOutgoing) {
+          _muted = false;
+          notifyListeners();
+        }
+        // Open mic/camera first so WebRTC creates tracks, then fix AVAudioSession (synthetic
+        // interruption). Doing this earlier stops the audio unit while nothing is publishing.
         await _syncLocalMediaState();
         await _syncLocalAudioState();
+        if (defaultTargetPlatform == TargetPlatform.iOS) {
+          await _iosReactivateAndResyncAudio();
+        }
       } catch (e) {
         debugPrint('IsometrikCallController: LiveKit connect error: $e');
       }
@@ -382,6 +463,103 @@ class IsometrikCallController extends ChangeNotifier {
       await sdk.startPublishing(meetingId: meetingId);
     } catch (e) {
       debugPrint('IsometrikCallController: startPublishing error: $e');
+    }
+
+    // After server publish, run timed recovery passes (background wake often needs late re-init).
+    if (defaultTargetPlatform == TargetPlatform.iOS &&
+        token != null &&
+        token.isNotEmpty &&
+        url != null) {
+      unawaited(_iosScheduleDeferredAudioRecovery());
+    }
+  }
+
+  /// iOS: native synthetic interruption + LiveKit `Hardware` speaker route (see `Hardware.setSpeakerphoneOn`).
+  Future<void> _iosReactivateAndResyncAudio() async {
+    try {
+      await sdk.native.reactivateIosCallAudioSession(hasVideo: hasVideo);
+      final room = _liveKit.currentRoom;
+      if (room != null) {
+        await room.setSpeakerOn(_speaker);
+      }
+      await _syncLocalAudioState();
+    } catch (e) {
+      debugPrint('IsometrikCallController: _iosReactivateAndResyncAudio: $e');
+    }
+  }
+
+  /// CallKit can signal audio ready before `Room.connect` completes — retry when the room appears.
+  Future<void> _iosAudioRecoveryWhenCallKitSessionReady() async {
+    if (_status == IsometrikCallStatus.ended) return;
+    if (_liveKit.currentRoom != null) {
+      await _iosReactivateAndResyncAudio();
+      return;
+    }
+    // ~6s of polling covers slow LiveKit connect from locked / killed wake.
+    for (var i = 0; i < 22; i++) {
+      await Future<void>.delayed(const Duration(milliseconds: 280));
+      if (_status == IsometrikCallStatus.ended) return;
+      if (_liveKit.currentRoom != null) {
+        await _iosReactivateAndResyncAudio();
+        return;
+      }
+    }
+  }
+
+  /// iOS: when the user returns to the app after answering from CallKit / notification, WebRTC audio
+  /// often needs a refresh (LiveKit Flutter + background). Safe no-op if not connected.
+  ///
+  /// **Reuse:** Also invoked from native `iosAppBecameActive` + minimized PiP
+  /// [WidgetsBindingObserver], with debouncing to absorb duplicate signals.
+  Future<void> refreshIosAudioAfterAppForegrounded() async {
+    if (defaultTargetPlatform != TargetPlatform.iOS) return;
+    if (_status != IsometrikCallStatus.connected) return;
+    if (_liveKit.currentRoom == null) return;
+
+    final now = DateTime.now();
+    final last = _lastIosForegroundAudioRefresh;
+    const debounce = Duration(milliseconds: 650);
+    if (last != null && now.difference(last) < debounce) {
+      return;
+    }
+    _lastIosForegroundAudioRefresh = now;
+
+    await _iosReactivateAndResyncAudio();
+    try {
+      final local = _liveKit.currentRoom?.localParticipant;
+      if (local != null && !_muted) {
+        await local.setMicrophoneEnabled(false);
+        await local.setMicrophoneEnabled(true);
+      }
+    } catch (e) {
+      debugPrint(
+        'IsometrikCallController: refreshIosAudioAfterAppForegrounded mic cycle: $e',
+      );
+    }
+  }
+
+  /// Extra passes for background / locked / terminated wake: session + tracks settle asynchronously.
+  Future<void> _iosScheduleDeferredAudioRecovery() async {
+    const delays = <Duration>[
+      Duration(milliseconds: 500),
+      Duration(milliseconds: 1500),
+      Duration(milliseconds: 3200),
+      Duration(milliseconds: 6200),
+    ];
+    for (final d in delays) {
+      await Future<void>.delayed(d);
+      if (_status == IsometrikCallStatus.ended) return;
+      if (_liveKit.currentRoom == null) continue;
+      try {
+        await _iosReactivateAndResyncAudio();
+        final local = _liveKit.currentRoom?.localParticipant;
+        if (local != null && !_muted) {
+          await local.setMicrophoneEnabled(false);
+          await local.setMicrophoneEnabled(true);
+        }
+      } catch (e) {
+        debugPrint('IsometrikCallController: deferred iOS audio recovery: $e');
+      }
     }
   }
 
@@ -511,12 +689,12 @@ class IsometrikCallController extends ChangeNotifier {
         } catch (e) {
           debugPrint('IsometrikCallController: toggleMute error: $e');
         }
-      } else {
-        // Fallback for pre-connect phase where only native side is active.
-        try {
-          await sdk.native.setMute(_muted);
-        } catch (_) {}
       }
+      // Always mirror mute to CallKit / ConnectionService — previously we only updated
+      // native when LiveKit had not connected yet, so the lock screen mute UI lied.
+      try {
+        await sdk.native.setMute(_muted);
+      } catch (_) {}
     } finally {
       _muteToggleInProgress = false;
       notifyListeners();
@@ -531,6 +709,13 @@ class IsometrikCallController extends ChangeNotifier {
         await room.setSpeakerOn(_speaker);
       } catch (e) {
         debugPrint('IsometrikCallController: applySpeakerRoute error: $e');
+      }
+      // Still drive AVAudioSession override on iOS so Control Center / CarPlay state
+      // matches what LiveKit publishes (speaker vs earpiece).
+      if (defaultTargetPlatform == TargetPlatform.iOS) {
+        try {
+          await sdk.native.setSpeaker(_speaker);
+        } catch (_) {}
       }
       return;
     }
@@ -715,9 +900,19 @@ class IsometrikCallController extends ChangeNotifier {
     try {
       await local.setMicrophoneEnabled(!_muted);
       await _applySpeakerRoute();
+      await _syncNativeCallUiIndicators();
     } catch (e) {
       debugPrint('IsometrikCallController: syncLocalAudioState error: $e');
     }
+  }
+
+  /// Keeps OS call mute UI (CallKit / notification actions) aligned with [isMuted]
+  /// shown on [IsometrikCallPage]. Speaker route sync lives in [_applySpeakerRoute].
+  Future<void> _syncNativeCallUiIndicators() async {
+    if (_status == IsometrikCallStatus.ended) return;
+    try {
+      await sdk.native.setMute(_muted);
+    } catch (_) {}
   }
 
   LocalVideoTrack? _firstLocalVideoTrack(LocalParticipant participant) {

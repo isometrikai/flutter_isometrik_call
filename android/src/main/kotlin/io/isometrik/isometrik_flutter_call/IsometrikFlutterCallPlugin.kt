@@ -10,6 +10,7 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.media.AudioAttributes
+import android.media.AudioManager
 import android.media.Ringtone
 import android.media.RingtoneManager
 import android.net.Uri
@@ -126,9 +127,21 @@ class IsometrikFlutterCallPlugin :
                 result.success(false)
             }
 
+            "reactivateIosCallAudioSession" -> {
+                // iOS-only; Android uses MODE_IN_COMMUNICATION on accept + LiveKit audio management.
+                result.success(null)
+            }
+
             "requestRuntimePermissions" -> {
                 handleRequestRuntimePermissions(call, result)
             }
+
+            "getIosPushKitDiagnostics" -> {
+                // iOS-only persisted buffer; Flutter shares the channel name cross-platform.
+                result.success(emptyList<Map<String, Any>>())
+            }
+
+            "clearIosPushKitDiagnostics" -> result.success(null)
 
             else -> result.notImplemented()
         }
@@ -508,6 +521,14 @@ class IsometrikFlutterCallPlugin :
                     cancelScheduledHangup()
                     stopIncomingRingtone()
                     cancelIncomingCallNotification()
+                    // Route mic/speaker for VoIP when waking from notification / lock (LiveKit/WebRTC
+                    // expect communication mode; ringtone may have left another mode active).
+                    try {
+                        val am = context.getSystemService(Context.AUDIO_SERVICE) as? AudioManager
+                        am?.mode = AudioManager.MODE_IN_COMMUNICATION
+                    } catch (t: Throwable) {
+                        Log.w(logTag, "Could not set MODE_IN_COMMUNICATION", t)
+                    }
                     val callId = activeCallId
                     if (callId != null) {
                         sendEvent(

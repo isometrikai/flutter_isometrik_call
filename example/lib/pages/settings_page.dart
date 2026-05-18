@@ -1,3 +1,5 @@
+import 'dart:convert';
+
 import 'package:flutter/material.dart';
 import 'package:isometrik_flutter_call/isometrik_flutter_call.dart';
 import 'package:provider/provider.dart';
@@ -13,6 +15,35 @@ class SettingsPage extends StatefulWidget {
 }
 
 class _SettingsPageState extends State<SettingsPage> {
+  /// One JSON pretty-print per persisted iOS VoIP row (UserDefaults ring buffer).
+  List<String> _iosPushKitDiagLines = <String>[];
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addPostFrameCallback((_) => _loadIosPushDiagnostics());
+  }
+
+  Future<void> _loadIosPushDiagnostics() async {
+    if (!mounted) return;
+    final c = context.read<ExampleAppController>();
+    final rows = await c.sdk.native.getIosPushKitDiagnostics();
+    if (!mounted) return;
+    final enc = const JsonEncoder.withIndent('  ');
+    final lines = rows
+        .map((Map<String, dynamic> r) {
+          try {
+            return enc.convert(r);
+          } catch (_) {
+            return r.toString();
+          }
+        })
+        .toList();
+    setState(() {
+      _iosPushKitDiagLines = lines;
+    });
+  }
+
   @override
   Widget build(BuildContext context) {
     final c = context.watch<ExampleAppController>();
@@ -127,6 +158,97 @@ class _SettingsPageState extends State<SettingsPage> {
                 metadata: <String, dynamic>{'source': 'settings'},
               );
             },
+          ),
+          const Divider(height: 32),
+          Row(
+            children: <Widget>[
+              const Expanded(
+                child: Text(
+                  'VoIP / PushKit diagnostics (iOS)',
+                  style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16),
+                ),
+              ),
+              TextButton(
+                onPressed: _loadIosPushDiagnostics,
+                child: const Text('Refresh'),
+              ),
+              TextButton(
+                onPressed: () async {
+                  final ok = await showDialog<bool>(
+                        context: context,
+                        builder: (BuildContext ctx) => AlertDialog(
+                          title: const Text('Clear VoIP diagnostics?'),
+                          content: const Text(
+                            'Removes the native UserDefaults ring buffer (last 40 VoIP events).',
+                          ),
+                          actions: <Widget>[
+                            TextButton(
+                              onPressed: () => Navigator.pop(ctx, false),
+                              child: const Text('Cancel'),
+                            ),
+                            TextButton(
+                              onPressed: () => Navigator.pop(ctx, true),
+                              child: const Text('Clear'),
+                            ),
+                          ],
+                        ),
+                      ) ??
+                      false;
+                  if (!ok || !context.mounted) return;
+                  await c.sdk.native.clearIosPushKitDiagnostics();
+                  await _loadIosPushDiagnostics();
+                  if (!context.mounted) return;
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    const SnackBar(content: Text('VoIP diagnostics cleared')),
+                  );
+                },
+                child: const Text('Clear'),
+              ),
+            ],
+          ),
+          const Text(
+            'Native layer logs each VoIP push: `pushkit_delegate_invoked` means the OS invoked the PushKit delegate '
+            '(before main-queue CallKit handling). Later rows include app state, resolved callId, '
+            '`usedFallbackCallId`, CallKit success, and payload key names only (no body content). '
+            'Survives crashes / relaunch — refresh after reproducing an issue.',
+            style: TextStyle(fontSize: 12, color: Colors.black54),
+          ),
+          const SizedBox(height: 8),
+          Container(
+            constraints: const BoxConstraints(maxHeight: 360),
+            decoration: BoxDecoration(
+              border: Border.all(color: Colors.black12),
+              borderRadius: BorderRadius.circular(8),
+            ),
+            child: _iosPushKitDiagLines.isEmpty
+                ? Center(
+                    child: Padding(
+                      padding: const EdgeInsets.all(16),
+                      child: Text(
+                        Theme.of(context).platform == TargetPlatform.iOS
+                            ? 'No VoIP diagnostics yet.\nWake the app via a VoIP push or tap Refresh.'
+                            : 'Stored on device iOS only (empty here on Android/simulator builds).',
+                        textAlign: TextAlign.center,
+                        style: const TextStyle(color: Colors.black54),
+                      ),
+                    ),
+                  )
+                : ListView.builder(
+                    padding: const EdgeInsets.all(8),
+                    itemCount: _iosPushKitDiagLines.length,
+                    itemBuilder: (BuildContext context, int i) {
+                      return Padding(
+                        padding: const EdgeInsets.only(bottom: 16),
+                        child: SelectableText(
+                          _iosPushKitDiagLines[i],
+                          style: const TextStyle(
+                            fontFamily: 'monospace',
+                            fontSize: 10,
+                          ),
+                        ),
+                      );
+                    },
+                  ),
           ),
           const Divider(height: 32),
           Row(

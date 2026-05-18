@@ -227,12 +227,39 @@ class IsometrikCallSdk {
     return fallback;
   }
 
+  /// Prefer initiator/sender fields, then the [members] entry matching initiator/sender ids
+  /// (first member is often not the caller in multi-party payloads).
+  String? _peerNameFromMatchingMember(IsometrikMeeting? meeting) {
+    if (meeting?.members == null || meeting!.members!.isEmpty) return null;
+    final candidates = <String>{
+      for (final s in <String?>[
+        meeting.initiatorIdentifier,
+        meeting.senderId,
+        meeting.userId,
+        meeting.createdBy,
+      ])
+        if (s != null && s.trim().isNotEmpty) s.trim(),
+    };
+    if (candidates.isEmpty) return null;
+    for (final m in meeting.members!) {
+      final mid = m.memberId?.trim();
+      final ident = m.memberIdentifier?.trim();
+      final name = m.memberName?.trim();
+      if (name == null || name.isEmpty) continue;
+      if (mid != null && candidates.contains(mid)) return name;
+      if (ident != null && candidates.contains(ident)) return name;
+    }
+    return null;
+  }
+
   String _resolvePeerName({
     IsometrikMeeting? primary,
     IsometrikMeeting? secondary,
     String fallback = 'Unknown',
   }) {
     final fromMembers = <String?>[
+      _peerNameFromMatchingMember(primary),
+      _peerNameFromMatchingMember(secondary),
       (primary?.members != null && primary!.members!.isNotEmpty)
           ? primary.members!.first.memberName
           : null,
@@ -480,6 +507,11 @@ class IsometrikCallSdk {
   }
 
   /// Update logged-in user (mirrors Swift `updateUserId` / `updateUserToken`).
+  ///
+  /// PushKit/APNS VoIP credential is **not** passed here — native only receives `userId` + `userToken`.
+  /// The device hex is PATCHed separately via `/chat/user` (`updatePushRegistryApnsToken`) once Dart has
+  /// received `voipTokenUpdated` (including native replay after `registerForVoipPushes`); see
+  /// `_attachNativeListeners`.
   Future<void> updateUserSession({
     required String userId,
     required String userToken,

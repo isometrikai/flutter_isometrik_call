@@ -111,6 +111,13 @@ class MethodChannelIsometrikFlutterCall extends IsometrikFlutterCallPlatform {
   }
 
   @override
+  Future<void> reactivateIosCallAudioSession({bool hasVideo = false}) async {
+    await methodChannel.invokeMethod<void>('reactivateIosCallAudioSession', {
+      'hasVideo': hasVideo,
+    });
+  }
+
+  @override
   Future<bool> wasCallKitReportedNatively() async {
     final dynamic r = await methodChannel.invokeMethod<dynamic>(
       'wasCallKitReportedNatively',
@@ -133,6 +140,27 @@ class MethodChannelIsometrikFlutterCall extends IsometrikFlutterCallPlatform {
       },
     );
     return Map<String, dynamic>.from(response ?? <String, dynamic>{});
+  }
+
+  @override
+  Future<List<Map<String, dynamic>>> getIosPushKitDiagnostics() async {
+    final dynamic rows = await methodChannel.invokeMethod<dynamic>(
+      'getIosPushKitDiagnostics',
+    );
+    if (rows is! List<dynamic>) {
+      return <Map<String, dynamic>>[];
+    }
+    return rows
+        .map(
+          (dynamic e) =>
+              Map<String, dynamic>.from(e as Map<dynamic, dynamic>),
+        )
+        .toList();
+  }
+
+  @override
+  Future<void> clearIosPushKitDiagnostics() async {
+    await methodChannel.invokeMethod<void>('clearIosPushKitDiagnostics');
   }
 
   @override
