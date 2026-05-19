@@ -237,6 +237,23 @@ callSdk.native.events.listen((e) {
 });
 ```
 
+### 6.1 Background / terminated / locked device (watchdog safety)
+
+If incoming VoIP works in the foreground but you see `EXC_CRASH (SIGKILL)` with **`Termination Reason: FRONTBOARD 0xBAADCA11`** on a cold launch, that is typically iOS killing the process for **watchdog / lifecycle deadlines**, not a Dart exception.
+
+**Native guarantees (PushKit)**
+
+- Every VoIP push schedules handling on the **main queue** (CallKit requirement), even if the delegate callback arrives off the main thread.
+- PushKit’s **`completion` handler is invoked exactly once** per push: normally right after CallKit’s `reportNewIncomingCall` completion; if that callback never runs (should be rare), an emergency fallback fires after several seconds so iOS never waits indefinitely.
+- **`completion` is never delayed behind Flutter** — the plugin calls PushKit completion before sending `incomingVoipPush` on the EventChannel (cold start can delay the channel; that must not block PushKit).
+- **Missing payload fields** still produce a valid CallKit report: display name falls back to `"Incoming Call"`; if no `callId` / `call_id` / `meetingId` is present, a **new UUID** is used so reporting always completes.
+
+**Host app expectations**
+
+- Call `initialize`, then `updateUserSession`, then `registerForVoipPushes()` as early as your product allows after login (same order as this doc).
+- Avoid blocking the main thread during app startup when a VoIP push can wake the app (heavy sync I/O, large JSON parsing on the main isolate, etc.).
+- In **Xcode → Devices**, inspect console lines prefixed with **`[ISMCall]`**: `VoIP push handling …`, `reportNewIncomingCall finished …`, `VoIP PushKit completion() after …s`. If you see **`VoIP PushKit completion FALLBACK`**, CallKit did not finish within the safety window — investigate CallKit errors or main-thread contention.
+
 ---
 
 ## 7. Login API (optional)

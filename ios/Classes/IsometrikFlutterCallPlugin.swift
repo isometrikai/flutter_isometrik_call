@@ -1,8 +1,61 @@
 import AVFAudio
 import CallKit
 import Flutter
+import Foundation
 import PushKit
 import UIKit
+import WebRTC
+
+// MARK: - PushKit diagnostics (UserDefaults ring buffer)
+//
+/// Persists lightweight traces across crashes / force-quits so the example **Settings → diagnostics**
+/// (or Dart `getIosPushKitDiagnostics`) can show last VoIP payloads (keys only), CallKit outcomes,
+/// and app state — without streaming large secrets through the Flutter event sink.
+///
+/// **Rows:** `pushkit_delegate_invoked` (OS delivered to delegate, before main/CallKit), then
+/// `pushkit` / `pushkit_simulator` / `pushkit_completion_timeout` as handling proceeds.
+///
+/// **Reuse:** Extend `appendPushKitDiag` fields if new failure modes need capture; keep records plist/JSON safe.
+private enum IsometrikPushKitDiagnosticsStore {
+  static let defaultsKey = "isometrik_flutter_call.pushkit_diag_v1"
+  static let maxRecords = 40
+
+  static func read() -> [[String: Any]] {
+    guard let data = UserDefaults.standard.data(forKey: defaultsKey),
+      let arr = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]]
+    else {
+      return []
+    }
+    return arr
+  }
+
+  static func clear() {
+    UserDefaults.standard.removeObject(forKey: defaultsKey)
+  }
+
+  /// - Parameter record: Must be JSON-serializable (String, number, bool, array, dict of same).
+  static func append(record: [String: Any]) {
+    var rows = read()
+    rows.insert(record, at: 0)
+    if rows.count > maxRecords {
+      rows = Array(rows.prefix(maxRecords))
+    }
+    guard JSONSerialization.isValidJSONObject(rows),
+      let data = try? JSONSerialization.data(withJSONObject: rows)
+    else {
+      NSLog("[ISMCall] diagnostics: skipped append (invalid JSON)")
+      return
+    }
+    UserDefaults.standard.set(data, forKey: defaultsKey)
+  }
+
+  /// ISO-8601 for JSON / Dart `DateTime.parse`.
+  static func nowIso8601() -> String {
+    let f = ISO8601DateFormatter()
+    f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+    return f.string(from: Date())
+  }
+}
 
 /// CallKit and PushKit only. MQTT uses the same broker/topics as ISMMQTT.swift but runs in
 /// Dart (IsometrikMqttService + IsometrikMeetingRouter), matching MQTT+ISMCall.swift routing.
@@ -27,12 +80,31 @@ public class IsometrikFlutterCallPlugin: NSObject, FlutterPlugin, FlutterStreamH
   private var activeCallId: String?
   private var outgoingCallUUID: UUID?
   private var callIdByUUID: [UUID: String] = [:]
-  private var latestVoipToken: String?
+  /// Hex VoIP credential from PushKit `didUpdate`. Cleared **only** in `didInvalidatePushToken`.
+  ///
+  /// **Not cleared on Flutter `unregisterVoipToken`** (logout): the OS rarely calls `didUpdate` again until
+  /// rotation, so retaining this lets us replay `voipTokenUpdated` once Dart reconnects listeners or calls
+  /// `registerForVoipPushes` — matching Dart `PATCH /chat/user` after `updateUserSession`.
+  private var lastPushKitVoipTokenHex: String?
   private var userId: String?
   private var userToken: String?
   private var configuration: [String: Any] = [:]
   private let callObserver = CXCallObserver()
   private var hangupWorkItem: DispatchWorkItem?
+  /// True when PushKit path already called `reportNewIncomingCall` for this VoIP push.
+  /// Dart reads via `wasCallKitReportedNatively` to avoid duplicate CallKit UI.
+  private var nativeCallKitReported: Bool = false
+  /// Last known call uses video — drives `AVAudioSession` mode during WebRTC reactivation.
+  private var activeCallHasVideo: Bool = false
+
+  /// CallKit banner text last shown for an **incoming** ring — echoed on `callAnswered` so Flutter can
+  /// render the same name when REST accept bodies omit initiator fields (common on cold VoIP wake).
+  private var lastCallKitIncomingDisplayName: String?
+
+  /// Fires every foreground transition — Dart uses this when the in-call UI has no
+  /// [WidgetsBindingObserver] (e.g. locked device + minimized PiP, or terminated → VoIP wake).
+  private var didBecomeActiveObserver: NSObjectProtocol?
+  private var audioRouteChangeObserver: NSObjectProtocol?
 
   public static func register(with registrar: FlutterPluginRegistrar) {
     let methodChannel = FlutterMethodChannel(
@@ -49,10 +121,51 @@ public class IsometrikFlutterCallPlugin: NSObject, FlutterPlugin, FlutterStreamH
     eventChannel.setStreamHandler(instance)
     registrar.addMethodCallDelegate(instance, channel: methodChannel)
     instance.provider.setDelegate(instance, queue: nil)
+    // Foreground events are not delivered through CallKit — needed so LiveKit/WebRTC can
+    // re-sync mic + speaker after unlock / app resume (PushKit answer from lock screen).
+    instance.didBecomeActiveObserver = NotificationCenter.default.addObserver(
+      forName: UIApplication.didBecomeActiveNotification,
+      object: nil,
+      queue: .main
+    ) { [weak instance] _ in
+      instance?.sendEvent(type: "iosAppBecameActive", payload: [
+        "reason": "UIApplication.didBecomeActiveNotification",
+      ])
+    }
+    /// **Critical:** `PKPushRegistry` must exist early (before Dart runs `registerForVoipPushes`), or a
+    /// VoIP wake on a terminated app can miss the delegate and violate PushKit lifecycle expectations.
+    instance.ensureVoipPushRegistryConfigured()
+    // Native VoIP audio watchdog — does not rely on Flutter timers when backgrounded / locked.
+    IsometrikVoipAudioCoordinator.shared.isCallKitCallActive = { [weak instance] in
+      instance?.activeCallUUID != nil
+    }
+    instance.installAudioRouteChangeObserver()
+  }
+
+  private func installAudioRouteChangeObserver() {
+    if audioRouteChangeObserver != nil { return }
+    audioRouteChangeObserver = NotificationCenter.default.addObserver(
+      forName: AVAudioSession.routeChangeNotification,
+      object: AVAudioSession.sharedInstance(),
+      queue: .main
+    ) { [weak self] _ in
+      self?.emitSpeakerRouteFromAudioSession()
+    }
+  }
+
+  /// Sync Dart UI when user changes route from Control Center / headset connect.
+  private func emitSpeakerRouteFromAudioSession() {
+    guard activeCallUUID != nil else { return }
+    let onSpeaker = IsometrikVoipAudioCoordinator.shared.isBuiltInSpeakerActive()
+    sendEvent(type: "speakerUpdated", payload: [
+      "isSpeakerOn": onSpeaker,
+      "callId": activeCallId as Any,
+    ])
   }
 
   public func onListen(withArguments arguments: Any?, eventSink events: @escaping FlutterEventSink) -> FlutterError? {
     eventSink = events
+    replayPushKitVoipTokenToDartIfAvailable()
     return nil
   }
 
@@ -75,8 +188,8 @@ public class IsometrikFlutterCallPlugin: NSObject, FlutterPlugin, FlutterStreamH
       registerForVoipPushes()
       result(nil)
     case "unregisterVoipToken":
-      sendEvent(type: "voipTokenInvalidated", payload: ["token": latestVoipToken as Any])
-      latestVoipToken = nil
+      // Keep `lastPushKitVoipTokenHex` — see property note (replay after re-login).
+      sendEvent(type: "voipTokenInvalidated", payload: [:])
       result(nil)
     case "reportIncomingCall":
       let args = call.arguments as? [String: Any] ?? [:]
@@ -119,6 +232,53 @@ public class IsometrikFlutterCallPlugin: NSObject, FlutterPlugin, FlutterStreamH
       result(nil)
     case "cancelScheduledHangup":
       cancelScheduledHangup()
+      result(nil)
+    case "wasCallKitReportedNatively":
+      result(nativeCallKitReported)
+      nativeCallKitReported = false
+    case "iosBeginVoipCallAudio":
+      let args = call.arguments as? [String: Any] ?? [:]
+      if let hv = args["hasVideo"] as? Bool { activeCallHasVideo = hv }
+      let preferSpeaker = args["preferSpeaker"] as? Bool ?? activeCallHasVideo
+      IsometrikVoipAudioCoordinator.shared.beginCall(
+        hasVideo: activeCallHasVideo,
+        preferSpeaker: preferSpeaker
+      )
+      result(nil)
+    case "iosRefreshVoipCallAudio":
+      let args = call.arguments as? [String: Any] ?? [:]
+      if let hv = args["hasVideo"] as? Bool { activeCallHasVideo = hv }
+      let preferSpeaker = args["preferSpeaker"] as? Bool ?? activeCallHasVideo
+      let hardReset = args["hardReset"] as? Bool ?? false
+      IsometrikVoipAudioCoordinator.shared.refresh(
+        hasVideo: activeCallHasVideo,
+        preferSpeaker: preferSpeaker,
+        hardReset: hardReset
+      )
+      result(nil)
+    case "iosEndVoipCallAudio":
+      IsometrikVoipAudioCoordinator.shared.endCall()
+      result(nil)
+    case "iosHandoffVoipCallAudioToLiveKit":
+      IsometrikVoipAudioCoordinator.shared.handoffToLiveKit()
+      result(nil)
+    case "reactivateIosCallAudioSession":
+      // Legacy Dart API — maps to refresh (prefer `iosRefreshVoipCallAudio` + `hardReset`).
+      let args = call.arguments as? [String: Any] ?? [:]
+      if let hv = args["hasVideo"] as? Bool { activeCallHasVideo = hv }
+      let preferSpeaker = args["preferSpeaker"] as? Bool ?? activeCallHasVideo
+      let hardReset = args["hardReset"] as? Bool ?? false
+      IsometrikVoipAudioCoordinator.shared.refresh(
+        hasVideo: activeCallHasVideo,
+        preferSpeaker: preferSpeaker,
+        hardReset: hardReset
+      )
+      result(nil)
+    case "getIosPushKitDiagnostics":
+      let rows = IsometrikPushKitDiagnosticsStore.read()
+      result(Self.sanitizeForStandardMessageCodec(rows))
+    case "clearIosPushKitDiagnostics":
+      IsometrikPushKitDiagnosticsStore.clear()
       result(nil)
     default:
       result(FlutterMethodNotImplemented)
@@ -206,6 +366,7 @@ public class IsometrikFlutterCallPlugin: NSObject, FlutterPlugin, FlutterStreamH
   }
 
   private func endCall(uuid: UUID, completion: (() -> Void)? = nil) {
+    IsometrikVoipAudioCoordinator.shared.endCall()
     let endedCallId = callIdForAction(uuid: uuid)
     if isSimulatorEnvironment() {
       _ = uuid
@@ -236,15 +397,48 @@ public class IsometrikFlutterCallPlugin: NSObject, FlutterPlugin, FlutterStreamH
     }
   }
 
-  /// PushKit is not usable on Simulator; skip registration so Dart can still run.
-  private func registerForVoipPushes() {
+  /// Registers once on the **main queue** so CallKit-facing delegate work stays main-aligned.
+  /// Idempotent — safe when Dart calls [registerForVoipPushes] after plugin startup.
+  ///
+  /// **Reuse:** Also invoked from `register(with:)` so terminated-app VoIP wakes always have a registry.
+  private func ensureVoipPushRegistryConfigured() {
     if isSimulatorEnvironment() {
       return
     }
+    guard pushRegistry == nil else { return }
     let registry = PKPushRegistry(queue: .main)
     registry.delegate = self
     registry.desiredPushTypes = [.voIP]
     pushRegistry = registry
+    NSLog("[ISMCall] PKPushRegistry configured at plugin load (early VoIP readiness)")
+  }
+
+  /// PushKit is not usable on Simulator; skip registration so Dart can still run.
+  private func registerForVoipPushes() {
+    ensureVoipPushRegistryConfigured()
+    replayPushKitVoipTokenToDartIfAvailable()
+  }
+
+  /// Re-emit PushKit credential if we already received one — typical after cold start subscribe or logout/login
+  /// (OS usually does **not** call `didUpdate` again for the same credential).
+  private func replayPushKitVoipTokenToDartIfAvailable() {
+    if isSimulatorEnvironment() {
+      return
+    }
+    guard let hex = lastPushKitVoipTokenHex else { return }
+    sendEvent(type: "voipTokenUpdated", payload: [
+      "token": hex,
+      "userId": userId as Any,
+      "hasSession": userToken != nil,
+      "replay": true,
+    ])
+  }
+
+  private func rememberIncomingCallKitDisplayName(_ raw: String) {
+    let t = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+    if !t.isEmpty {
+      lastCallKitIncomingDisplayName = t
+    }
   }
 
   private func reportIncomingCall(
@@ -260,6 +454,8 @@ public class IsometrikFlutterCallPlugin: NSObject, FlutterPlugin, FlutterStreamH
       callIdByUUID[uuid] = callId
       activeCallUUID = uuid
       activeCallId = callId
+      activeCallHasVideo = hasVideo
+      rememberIncomingCallKitDisplayName(callerName)
       sendEvent(type: "incomingCallReported", payload: [
         "callId": callId,
         "callerName": callerName,
@@ -271,6 +467,7 @@ public class IsometrikFlutterCallPlugin: NSObject, FlutterPlugin, FlutterStreamH
     }
     let update = CXCallUpdate()
     update.remoteHandle = CXHandle(type: .generic, value: callerName)
+    update.localizedCallerName = callerName
     update.hasVideo = hasVideo
     let uuid = UUID()
     callIdByUUID[uuid] = callId
@@ -282,6 +479,8 @@ public class IsometrikFlutterCallPlugin: NSObject, FlutterPlugin, FlutterStreamH
       }
       self?.activeCallUUID = uuid
       self?.activeCallId = callId
+      self?.activeCallHasVideo = hasVideo
+      self?.rememberIncomingCallKitDisplayName(callerName)
       self?.sendEvent(type: "incomingCallReported", payload: [
         "callId": callId,
         "callerName": callerName,
@@ -329,6 +528,8 @@ public class IsometrikFlutterCallPlugin: NSObject, FlutterPlugin, FlutterStreamH
       activeCallUUID = uuid
       outgoingCallUUID = uuid
       activeCallId = callId
+      activeCallHasVideo = hasVideo
+      lastCallKitIncomingDisplayName = nil
       sendEvent(type: "outgoingCallStarted", payload: [
         "callId": callId,
         "calleeName": calleeName,
@@ -351,9 +552,11 @@ public class IsometrikFlutterCallPlugin: NSObject, FlutterPlugin, FlutterStreamH
         return
       }
       self?.provider.reportOutgoingCall(with: uuid, startedConnectingAt: Date())
+      self?.lastCallKitIncomingDisplayName = nil
       self?.activeCallUUID = uuid
       self?.outgoingCallUUID = uuid
       self?.activeCallId = callId
+      self?.activeCallHasVideo = hasVideo
       self?.sendEvent(type: "outgoingCallStarted", payload: [
         "callId": callId,
         "calleeName": calleeName,
@@ -398,27 +601,437 @@ public class IsometrikFlutterCallPlugin: NSObject, FlutterPlugin, FlutterStreamH
   }
 
   private func setSpeaker(_ isSpeakerOn: Bool, result: @escaping FlutterResult) {
-    do {
-      try AVAudioSession.sharedInstance().setCategory(.playAndRecord, mode: .voiceChat, options: [.allowBluetooth])
-      try AVAudioSession.sharedInstance().setActive(true)
-      try AVAudioSession.sharedInstance().overrideOutputAudioPort(isSpeakerOn ? .speaker : .none)
-      sendEvent(type: "speakerUpdated", payload: ["isSpeakerOn": isSpeakerOn, "callId": activeCallId as Any])
-      result(nil)
-    } catch {
-      result(FlutterError(code: "audio_error", message: error.localizedDescription, details: nil))
+    IsometrikVoipAudioCoordinator.shared.setPreferSpeaker(isSpeakerOn)
+    sendEvent(type: "speakerUpdated", payload: ["isSpeakerOn": isSpeakerOn, "callId": activeCallId as Any])
+    result(nil)
+  }
+
+  /// Matches Dart [IsometrikMeeting.indicatesVideoCall] / VoIP JSON variants.
+  private static func payloadIndicatesVideo(_ payload: [String: Any]) -> Bool {
+    if let v = payload["hasVideo"] as? Bool, v { return true }
+    if let v = payload["has_video"] as? Bool, v { return true }
+    if let v = payload["isVideo"] as? Bool, v { return true }
+    if let v = payload["is_video"] as? Bool, v { return true }
+    if let v = payload["hasVideo"] as? Int, v != 0 { return true }
+    if let v = payload["has_video"] as? Int, v != 0 { return true }
+    if let v = payload["audioOnly"] as? Bool, !v { return true }
+    if let v = payload["audioOnly"] as? Int, v == 0 { return true }
+    let typeKeys = ["customType", "callType", "type"]
+    for key in typeKeys {
+      guard let raw = payload[key] as? String else { continue }
+      let n = raw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        .replacingOccurrences(of: "[^a-z0-9]", with: "", options: .regularExpression)
+      if n.contains("video") && !n.contains("audioonly") {
+        return true
+      }
     }
+    return false
   }
 
   private func sendEvent(type: String, payload: [String: Any]) {
-    eventSink?(["type": type, "payload": payload])
+    let safePayload = Self.sanitizeForStandardMessageCodec(payload) as? [String: Any] ?? [:]
+    eventSink?(["type": type, "payload": safePayload])
   }
+
+  /// Flutter's `StandardMessageCodec` only accepts a narrow set of types. VoIP JSON often includes
+  /// `Date`, non-string dictionary keys, or custom objects — those can **crash the engine** or drop events.
+  ///
+  /// **Reuse:** Any new `sendEvent` payloads should pass through this path (via `sendEvent`).
+  private static func sanitizeForStandardMessageCodec(_ value: Any) -> Any {
+    switch value {
+    case let b as Bool:
+      return b
+    case let i as Int:
+      return i
+    case let i as Int64:
+      return i
+    case let d as Double:
+      return d
+    case let f as Float:
+      return Double(f)
+    case let n as NSNumber:
+      return n
+    case let s as String:
+      return s
+    case let d as Date:
+      let f = ISO8601DateFormatter()
+      f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+      return f.string(from: d)
+    case let dict as [String: Any]:
+      var out: [String: Any] = [:]
+      out.reserveCapacity(dict.count)
+      for (k, v) in dict {
+        out[k] = sanitizeForStandardMessageCodec(v)
+      }
+      return out
+    case let dict as [AnyHashable: Any]:
+      var out: [String: Any] = [:]
+      for (k, v) in dict {
+        guard let ks = k as? String else { continue }
+        out[ks] = sanitizeForStandardMessageCodec(v)
+      }
+      return out
+    case let arr as [Any]:
+      return arr.map { sanitizeForStandardMessageCodec($0) }
+    case let arr as NSArray:
+      return (0..<arr.count).map { sanitizeForStandardMessageCodec(arr.object(at: $0)) }
+    case is NSNull:
+      return NSNull()
+    default:
+      return String(describing: value)
+    }
+  }
+
+  /// `PKPushPayload.dictionaryPayload` is `[AnyHashable: Any]` on some SDKs — normalize for string keys.
+  private static func stringKeyedPayload(_ raw: [AnyHashable: Any]) -> [String: Any] {
+    if let direct = raw as? [String: Any] { return direct }
+    var out: [String: Any] = [:]
+    for (k, v) in raw {
+      if let ks = k as? String { out[ks] = v }
+    }
+    return out
+  }
+
+  /// Earliest hook: **OS invoked** our PushKit VoIP delegate — logged **before** optional
+  /// `DispatchQueue.main.async` for CallKit. Persists a row with `incomingPath == pushkit_delegate_invoked`
+  /// so Settings / the Dart `getIosPushKitDiagnostics` method can distinguish “no push” vs “push arrived but failed later”.
+  private static func appendPushKitDelegateInvokedDiagnostic(payload: PKPushPayload) {
+    let onMain = Thread.isMainThread
+    let raw = payload.dictionaryPayload
+    var keys = Set<String>()
+    for k in raw.keys {
+      if let s = k as? String { keys.insert(s) }
+    }
+    let sortedKeys = keys.sorted()
+    let appState: String = {
+      guard onMain else { return "n/a_off_main_delegate" }
+      switch UIApplication.shared.applicationState {
+      case .active: return "active"
+      case .inactive: return "inactive"
+      case .background: return "background"
+      @unknown default: return "unknown"
+      }
+    }()
+    IsometrikPushKitDiagnosticsStore.append(record: [
+      "ts": IsometrikPushKitDiagnosticsStore.nowIso8601(),
+      "incomingPath": "pushkit_delegate_invoked",
+      "delegateOnMainThread": onMain,
+      "willAsyncToMainForCallKit": !onMain,
+      "appState": appState,
+      "payloadTopLevelKeys": sortedKeys,
+      "note":
+        "OS delivered VoIP push to PKPushRegistryDelegate; handling continues on main when required for CallKit.",
+    ])
+  }
+
+  /// Aligns with Dart [IsometrikMeeting.fromJson] / server VoIP payloads so CallKit shows the real caller.
+  private static func resolvedVoipCallerDisplayName(from payload: [String: Any]) -> String {
+    let stringKeys: [String] = [
+      "callerName", "caller_name",
+      "initiatorName", "initiatorUserName", "createdByName",
+      "senderName",
+      "name", "displayName", "display_name",
+      "userName", "username", "memberName",
+      "title", "label",
+    ]
+    for key in stringKeys {
+      if let s = payload[key] as? String {
+        let t = s.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !t.isEmpty { return t }
+      }
+    }
+    if let user = payload["user"] as? [String: Any] {
+      let nestedKeys = ["userName", "name", "displayName", "callerName"]
+      for key in nestedKeys {
+        if let s = user[key] as? String {
+          let t = s.trimmingCharacters(in: .whitespacesAndNewlines)
+          if !t.isEmpty { return t }
+        }
+      }
+    }
+    var initiatorCandidates = Set<String>()
+    for key in ["initiatorIdentifier", "initiatorId", "callerId", "senderId", "userId", "createdBy"] {
+      if let s = payload[key] as? String {
+        let t = s.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !t.isEmpty { initiatorCandidates.insert(t) }
+      }
+    }
+    if let members = payload["members"] as? [[String: Any]] {
+      func name(from m: [String: Any]) -> String {
+        (m["memberName"] as? String)?
+          .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+      }
+      if !initiatorCandidates.isEmpty {
+        for m in members {
+          let mid = (m["memberId"] as? String)?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+          let mIdent = (m["memberIdentifier"] as? String)?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+          let n = name(from: m)
+          if n.isEmpty { continue }
+          if (!mid.isEmpty && initiatorCandidates.contains(mid))
+            || (!mIdent.isEmpty && initiatorCandidates.contains(mIdent))
+          {
+            return n
+          }
+        }
+      }
+      for m in members {
+        let n = name(from: m)
+        if !n.isEmpty { return n }
+      }
+    }
+    return "Incoming Call"
+  }
+
+  /// Last-resort timeout only if `reportNewIncomingCall` never runs its completion (should be rare).
+  /// Must be long enough not to beat CallKit on a slow / locked-device cold start.
+  private static let voipPushKitCompletionFallbackSeconds: TimeInterval = 5.0
+
+  /// PushKit: Apple requires `completion` to be called exactly once per VoIP push after handling.
+  /// We complete immediately after CallKit’s `reportNewIncomingCall` callback (not after Flutter events).
+  private func handleIncomingVoipPush(
+    payload: PKPushPayload,
+    pushCompletion: @escaping () -> Void
+  ) {
+    let payloadData = Self.stringKeyedPayload(payload.dictionaryPayload)
+    let pushReceivedMono = CFAbsoluteTimeGetCurrent()
+    let traceCallId =
+      payloadData["callId"] as? String ?? payloadData["meetingId"] as? String ?? "?"
+    let appStateLabel: String = {
+      switch UIApplication.shared.applicationState {
+      case .active: return "active"
+      case .inactive: return "inactive"
+      case .background: return "background"
+      @unknown default: return "unknown"
+      }
+    }()
+    NSLog(
+      "[ISMCall] VoIP push handling on main=%@ callId=%@ appState=%@",
+      Thread.isMainThread ? "yes" : "no",
+      traceCallId,
+      appStateLabel
+    )
+
+    var voipPushCompletionTimeout: DispatchWorkItem?
+    var completed = false
+    let completeVoipPushOnce: () -> Void = {
+      if completed { return }
+      completed = true
+      voipPushCompletionTimeout?.cancel()
+      voipPushCompletionTimeout = nil
+      let elapsed = CFAbsoluteTimeGetCurrent() - pushReceivedMono
+      NSLog("[ISMCall] VoIP PushKit completion() after %.4fs (must be once)", elapsed)
+      pushCompletion()
+    }
+
+    let timeout = DispatchWorkItem {
+      NSLog(
+        "[ISMCall] VoIP PushKit completion FALLBACK — reportNewIncomingCall did not complete within %.0fs (complete anyway so iOS does not hang)",
+        Self.voipPushKitCompletionFallbackSeconds
+      )
+      IsometrikPushKitDiagnosticsStore.append(record: [
+        "ts": IsometrikPushKitDiagnosticsStore.nowIso8601(),
+        "incomingPath": "pushkit_completion_timeout",
+        "appState": appStateLabel,
+        "traceCallIdHint": traceCallId,
+        "callKitOk": false,
+        "note":
+          "Invoked PushKit completion() after \(Self.voipPushKitCompletionFallbackSeconds)s without CallKit callback — investigate main-thread contention or CallKit deadlock.",
+      ])
+      completeVoipPushOnce()
+    }
+    voipPushCompletionTimeout = timeout
+    DispatchQueue.main.asyncAfter(
+      deadline: .now() + Self.voipPushKitCompletionFallbackSeconds,
+      execute: timeout
+    )
+
+    let callerName: String = Self.resolvedVoipCallerDisplayName(from: payloadData)
+
+    let explicitCallId: String? = {
+      func nonEmpty(_ raw: String?) -> String? {
+        guard let t = raw?.trimmingCharacters(in: .whitespacesAndNewlines), !t.isEmpty else {
+          return nil
+        }
+        return t
+      }
+      func stringFrom(_ v: Any?) -> String? {
+        guard let v else { return nil }
+        if let s = v as? String { return nonEmpty(s) }
+        if let n = v as? NSNumber { return nonEmpty("\(n)") }
+        if let i = v as? Int { return nonEmpty("\(i)") }
+        if let i = v as? Int64 { return nonEmpty("\(i)") }
+        return nil
+      }
+      for key in ["callId", "call_id", "meetingId"] {
+        if let s = stringFrom(payloadData[key]) { return s }
+      }
+      return nil
+    }()
+    let usedFallbackCallId = explicitCallId == nil
+    let callId = explicitCallId ?? UUID().uuidString
+
+    let hasVideo = Self.payloadIndicatesVideo(payloadData)
+
+    activeCallHasVideo = hasVideo
+
+    if isSimulatorEnvironment() {
+      completeVoipPushOnce()
+      sendEvent(type: "incomingVoipPush", payload: ["payload": payloadData])
+      IsometrikPushKitDiagnosticsStore.append(record: Self.makeVoipDiagRecord(
+        incomingPath: "pushkit_simulator",
+        payloadData: payloadData,
+        appStateLabel: appStateLabel,
+        callId: callId,
+        callerName: callerName,
+        hasVideo: hasVideo,
+        usedFallbackCallId: usedFallbackCallId,
+        nonEndedCxCallCount: 0,
+        tookActivePointer: false,
+        callKitOk: true,
+        callKitError: nil,
+        pushCompletionElapsedSec: CFAbsoluteTimeGetCurrent() - pushReceivedMono,
+        extra: ["note": "CallKit/PushKit skipped on Simulator"]
+      ))
+      return
+    }
+
+    let nonEndedCxCallCount = callObserver.calls.filter { !$0.hasEnded }.count
+    /// When another CallKit call is already present (ringing or connected), do not move the
+    /// “active” pointer — call-waiting uses [CXAnswerCallAction] to repoint [activeCallUUID].
+    let shouldTakeActiveSlot = nonEndedCxCallCount == 0
+
+    let uuid = UUID()
+    let update = CXCallUpdate()
+    update.remoteHandle = CXHandle(type: .generic, value: callerName)
+    update.hasVideo = hasVideo
+    update.localizedCallerName = callerName
+
+    callIdByUUID[uuid] = callId
+
+    let reportStart = CFAbsoluteTimeGetCurrent()
+    provider.reportNewIncomingCall(with: uuid, update: update) { [weak self] error in
+      let reportElapsed = CFAbsoluteTimeGetCurrent() - reportStart
+      NSLog("[ISMCall] reportNewIncomingCall finished in %.4fs", reportElapsed)
+      guard let self else {
+        completeVoipPushOnce()
+        return
+      }
+      if let error {
+        NSLog("[ISMCall] CallKit rejected VoIP incoming call: \(error.localizedDescription)")
+        self.callIdByUUID[uuid] = nil
+        if self.activeCallUUID == uuid {
+          self.activeCallUUID = nil
+          self.activeCallId = nil
+        }
+        completeVoipPushOnce()
+        IsometrikPushKitDiagnosticsStore.append(record: Self.makeVoipDiagRecord(
+          incomingPath: "pushkit",
+          payloadData: payloadData,
+          appStateLabel: appStateLabel,
+          callId: callId,
+          callerName: callerName,
+          hasVideo: hasVideo,
+          usedFallbackCallId: usedFallbackCallId,
+          nonEndedCxCallCount: nonEndedCxCallCount,
+          tookActivePointer: false,
+          callKitOk: false,
+          callKitError: error.localizedDescription,
+          pushCompletionElapsedSec: CFAbsoluteTimeGetCurrent() - pushReceivedMono,
+          extra: ["reportElapsedSec": reportElapsed]
+        ))
+        self.sendEvent(type: "incomingVoipPush", payload: [
+          "payload": payloadData,
+          "callId": callId,
+          "callerName": callerName,
+          "hasVideo": hasVideo,
+          "callkitError": error.localizedDescription,
+        ])
+        return
+      }
+
+      if shouldTakeActiveSlot {
+        self.activeCallUUID = uuid
+        self.activeCallId = callId
+      }
+      self.nativeCallKitReported = true
+      self.rememberIncomingCallKitDisplayName(callerName)
+
+      completeVoipPushOnce()
+      IsometrikPushKitDiagnosticsStore.append(record: Self.makeVoipDiagRecord(
+        incomingPath: "pushkit",
+        payloadData: payloadData,
+        appStateLabel: appStateLabel,
+        callId: callId,
+        callerName: callerName,
+        hasVideo: hasVideo,
+        usedFallbackCallId: usedFallbackCallId,
+        nonEndedCxCallCount: nonEndedCxCallCount,
+        tookActivePointer: shouldTakeActiveSlot,
+        callKitOk: true,
+        callKitError: nil,
+        pushCompletionElapsedSec: CFAbsoluteTimeGetCurrent() - pushReceivedMono,
+        extra: ["reportElapsedSec": reportElapsed]
+      ))
+      self.sendEvent(type: "incomingVoipPush", payload: [
+        "payload": payloadData,
+        "callId": callId,
+        "callerName": callerName,
+        "hasVideo": hasVideo,
+        // Dart must not call `reportIncomingCall` again when this is true (avoids 2 CallKit UIs).
+        "nativeCallKitReported": true,
+      ])
+    }
+  }
+
+  /// JSON-safe row for [IsometrikPushKitDiagnosticsStore] — **keys only** from payload to limit PII / size.
+  private static func makeVoipDiagRecord(
+    incomingPath: String,
+    payloadData: [String: Any],
+    appStateLabel: String,
+    callId: String,
+    callerName: String,
+    hasVideo: Bool,
+    usedFallbackCallId: Bool,
+    nonEndedCxCallCount: Int,
+    tookActivePointer: Bool,
+    callKitOk: Bool,
+    callKitError: String?,
+    pushCompletionElapsedSec: TimeInterval,
+    extra: [String: Any] = [:]
+  ) -> [String: Any] {
+    let sortedKeys = payloadData.keys.sorted()
+    var row: [String: Any] = [
+      "ts": IsometrikPushKitDiagnosticsStore.nowIso8601(),
+      "incomingPath": incomingPath,
+      "appState": appStateLabel,
+      "callId": callId,
+      "callerName": callerName,
+      "hasVideo": hasVideo,
+      "usedFallbackCallId": usedFallbackCallId,
+      "nonEndedCxCallCount": nonEndedCxCallCount,
+      "tookActivePointer": tookActivePointer,
+      "callKitOk": callKitOk,
+      "pushCompletionElapsedSec": pushCompletionElapsedSec,
+      "payloadTopLevelKeys": sortedKeys,
+    ]
+    if let callKitError {
+      row["callKitError"] = callKitError
+    }
+    if !extra.isEmpty {
+      row["extra"] = sanitizeForStandardMessageCodec(extra) as? [String: Any] ?? [:]
+    }
+    return row
+  }
+
 }
 
 extension IsometrikFlutterCallPlugin: PKPushRegistryDelegate {
   public func pushRegistry(_ registry: PKPushRegistry, didUpdate pushCredentials: PKPushCredentials, for type: PKPushType) {
     guard type == .voIP else { return }
     let token = pushCredentials.token.map { String(format: "%02.2hhx", $0) }.joined()
-    latestVoipToken = token
+    lastPushKitVoipTokenHex = token
     sendEvent(type: "voipTokenUpdated", payload: [
       "token": token,
       "userId": userId as Any,
@@ -428,7 +1041,7 @@ extension IsometrikFlutterCallPlugin: PKPushRegistryDelegate {
 
   public func pushRegistry(_ registry: PKPushRegistry, didInvalidatePushTokenFor type: PKPushType) {
     guard type == .voIP else { return }
-    latestVoipToken = nil
+    lastPushKitVoipTokenHex = nil
     sendEvent(type: "voipTokenInvalidated", payload: [:])
   }
 
@@ -442,18 +1055,36 @@ extension IsometrikFlutterCallPlugin: PKPushRegistryDelegate {
       completion()
       return
     }
-    let payloadData = payload.dictionaryPayload
-    sendEvent(type: "incomingVoipPush", payload: ["payload": payloadData])
-    completion()
+    Self.appendPushKitDelegateInvokedDiagnostic(payload: payload)
+    // CallKit must run on the main queue. Funnel here so PushKit always reaches `handleIncomingVoipPush`
+    // on main (background / locked wake may call the delegate off-main depending on OS behavior).
+    let run: () -> Void = { [weak self] in
+      guard let self else {
+        NSLog("[ISMCall] VoIP push: plugin deallocated before handling — completing PushKit to satisfy API contract")
+        completion()
+        return
+      }
+      self.handleIncomingVoipPush(payload: payload, pushCompletion: completion)
+    }
+    if Thread.isMainThread {
+      run()
+    } else {
+      NSLog("[ISMCall] VoIP push: delegate off main — async to main for CallKit")
+      DispatchQueue.main.async(execute: run)
+    }
   }
 }
 
 extension IsometrikFlutterCallPlugin: CXProviderDelegate {
   public func providerDidReset(_ provider: CXProvider) {
+    IsometrikVoipAudioCoordinator.shared.endCall()
+    nativeCallKitReported = false
     callIdByUUID.removeAll()
     activeCallUUID = nil
     activeCallId = nil
     outgoingCallUUID = nil
+    activeCallHasVideo = false
+    lastCallKitIncomingDisplayName = nil
     sendEvent(type: "providerReset", payload: [:])
   }
 
@@ -461,14 +1092,27 @@ extension IsometrikFlutterCallPlugin: CXProviderDelegate {
     let answeredCallId = callIdForAction(uuid: action.callUUID)
     activeCallUUID = action.callUUID
     activeCallId = answeredCallId
-    sendEvent(type: "callAnswered", payload: ["callId": answeredCallId as Any])
+    sendEvent(type: "callAnswered", payload: [
+      "callId": answeredCallId as Any,
+      "hasVideo": activeCallHasVideo,
+      "callerName": lastCallKitIncomingDisplayName as Any,
+    ])
     action.fulfill()
+    IsometrikVoipAudioCoordinator.shared.refresh(
+      hasVideo: activeCallHasVideo,
+      preferSpeaker: activeCallHasVideo,
+      hardReset: false
+    )
   }
 
   public func provider(_ provider: CXProvider, perform action: CXEndCallAction) {
+    IsometrikVoipAudioCoordinator.shared.endCall()
     let endedCallId = callIdForAction(uuid: action.callUUID)
     sendEvent(type: "callEnded", payload: ["callId": endedCallId as Any])
     callIdByUUID[action.callUUID] = nil
+    if callIdByUUID.isEmpty {
+      lastCallKitIncomingDisplayName = nil
+    }
     if activeCallUUID == action.callUUID {
       activeCallUUID = nil
       activeCallId = nil
@@ -487,10 +1131,31 @@ extension IsometrikFlutterCallPlugin: CXProviderDelegate {
 
   public func provider(_ provider: CXProvider, perform action: CXSetMutedCallAction) {
     let mutedCallId = callIdForAction(uuid: action.callUUID)
+    let resolvedCallId = mutedCallId ?? activeCallId
     sendEvent(type: "muteUpdated", payload: [
       "isMuted": action.isMuted,
-      "callId": mutedCallId as Any,
+      "callId": resolvedCallId as Any,
     ])
     action.fulfill()
+  }
+
+  /// WebRTC/LiveKit must be told when CallKit activates the shared `AVAudioSession` (answer from lock
+  /// screen / background); otherwise capture and playback often stay silent.
+  public func provider(_ provider: CXProvider, didActivate audioSession: AVAudioSession) {
+    let rtc = RTCAudioSession.sharedInstance()
+    rtc.audioSessionDidActivate(audioSession)
+    rtc.isAudioEnabled = true
+    // Native watchdog + stable RTC configure — does not depend on Flutter `Future.delayed`.
+    IsometrikVoipAudioCoordinator.shared.beginCall(
+      hasVideo: activeCallHasVideo,
+      preferSpeaker: activeCallHasVideo
+    )
+    sendEvent(type: "callAudioSessionActivated", payload: [
+      "reason": "callKit",
+    ])
+  }
+
+  public func provider(_ provider: CXProvider, didDeactivate audioSession: AVAudioSession) {
+    RTCAudioSession.sharedInstance().audioSessionDidDeactivate(audioSession)
   }
 }

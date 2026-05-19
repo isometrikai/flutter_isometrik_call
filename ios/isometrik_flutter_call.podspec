@@ -16,6 +16,8 @@ LiveKit-first call controls to Flutter applications.
   s.source           = { :path => '.' }
   s.source_files = 'Classes/**/*'
   s.dependency 'Flutter'
+  # Keep in sync with flutter_webrtc’s WebRTC-SDK pin so CallKit can notify RTCAudioSession.
+  s.dependency 'WebRTC-SDK', '137.7151.04'
   s.platform = :ios, '13.0'
 
   # Flutter.framework does not contain a i386 slice.

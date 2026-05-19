@@ -175,6 +175,11 @@ class IsometrikCallSdk {
   /// call, ignore subsequent duplicates.
   String? _lastIncomingCallEndedMeetingId;
 
+  /// While user is accepting via CallKit, ignore `callEnded` for this meeting
+  /// (duplicate CallKit UI dismisses the extra UUID and must not `leaveMeeting`).
+  String? _incomingAcceptInProgressMeetingId;
+  DateTime? _incomingAcceptStartedAt;
+
   /// Meeting ended by server/MQTT; when native `callEnded` follows this
   /// signal we must skip leave/reject API to avoid 400 "already ended".
   String? _lastServerEndedMeetingId;
@@ -227,12 +232,39 @@ class IsometrikCallSdk {
     return fallback;
   }
 
+  /// Prefer initiator/sender fields, then the [members] entry matching initiator/sender ids
+  /// (first member is often not the caller in multi-party payloads).
+  String? _peerNameFromMatchingMember(IsometrikMeeting? meeting) {
+    if (meeting?.members == null || meeting!.members!.isEmpty) return null;
+    final candidates = <String>{
+      for (final s in <String?>[
+        meeting.initiatorIdentifier,
+        meeting.senderId,
+        meeting.userId,
+        meeting.createdBy,
+      ])
+        if (s != null && s.trim().isNotEmpty) s.trim(),
+    };
+    if (candidates.isEmpty) return null;
+    for (final m in meeting.members!) {
+      final mid = m.memberId?.trim();
+      final ident = m.memberIdentifier?.trim();
+      final name = m.memberName?.trim();
+      if (name == null || name.isEmpty) continue;
+      if (mid != null && candidates.contains(mid)) return name;
+      if (ident != null && candidates.contains(ident)) return name;
+    }
+    return null;
+  }
+
   String _resolvePeerName({
     IsometrikMeeting? primary,
     IsometrikMeeting? secondary,
     String fallback = 'Unknown',
   }) {
     final fromMembers = <String?>[
+      _peerNameFromMatchingMember(primary),
+      _peerNameFromMatchingMember(secondary),
       (primary?.members != null && primary!.members!.isNotEmpty)
           ? primary.members!.first.memberName
           : null,
@@ -255,11 +287,26 @@ class IsometrikCallSdk {
     ], fallback: fallback);
   }
 
+  /// VoIP / accept payloads may only expose `hasVideo` or `audioOnly` without `customType`.
+  bool _meetingIndicatesVideo(
+    IsometrikMeeting? meeting, {
+    bool nativeHasVideo = false,
+  }) {
+    if (nativeHasVideo) return true;
+    if (meeting == null) return false;
+    return meeting.indicatesVideoCall;
+  }
+
   IsometrikLiveCallType _resolveCallType({
     IsometrikMeeting? primary,
     IsometrikMeeting? secondary,
     IsometrikLiveCallType fallback = IsometrikLiveCallType.audioCall,
+    bool nativeHasVideo = false,
   }) {
+    if (_meetingIndicatesVideo(primary, nativeHasVideo: nativeHasVideo) ||
+        _meetingIndicatesVideo(secondary)) {
+      return IsometrikLiveCallType.videoCall;
+    }
     final customType = _firstNonEmpty(<String?>[
       primary?.customType,
       secondary?.customType,
@@ -290,6 +337,33 @@ class IsometrikCallSdk {
       return 'Group call';
     }
     return baseName;
+  }
+
+  bool _meetingHasDisplayName(IsometrikMeeting m) {
+    if ((m.initiatorName?.trim().isNotEmpty ?? false) ||
+        (m.senderName?.trim().isNotEmpty ?? false)) {
+      return true;
+    }
+    return _peerNameFromMatchingMember(m) != null;
+  }
+
+  /// MQTT can refresh the pending meeting with sparse payloads — keep VoIP-derived caller/video hints.
+  IsometrikMeeting _mergeIncomingPendingDetail(
+    IsometrikMeeting incoming,
+    IsometrikMeeting? previous,
+  ) {
+    if (previous == null) return incoming;
+    var merged = incoming;
+    if (!_meetingHasDisplayName(incoming)) {
+      final hint = (previous.initiatorName?.trim().isNotEmpty ?? false)
+          ? previous.initiatorName
+          : previous.senderName;
+      merged = merged.withVoipNativeCallerHint(hint);
+    }
+    if (!_meetingIndicatesVideo(merged) && _meetingIndicatesVideo(previous)) {
+      merged = merged.withVideoCallForced();
+    }
+    return merged;
   }
 
   Future<IsometrikCallPermissionsResult> ensureCallPermissions({
@@ -480,6 +554,11 @@ class IsometrikCallSdk {
   }
 
   /// Update logged-in user (mirrors Swift `updateUserId` / `updateUserToken`).
+  ///
+  /// PushKit/APNS VoIP credential is **not** passed here — native only receives `userId` + `userToken`.
+  /// The device hex is PATCHed separately via `/chat/user` (`updatePushRegistryApnsToken`) once Dart has
+  /// received `voipTokenUpdated` (including native replay after `registerForVoipPushes`); see
+  /// `_attachNativeListeners`.
   Future<void> updateUserSession({
     required String userId,
     required String userToken,
@@ -871,7 +950,14 @@ class IsometrikCallSdk {
   }
 
   /// Report CallKit incoming UI from decoded PushKit / MQTT payload — mirrors `reportIncomingCall(callDetails:)`.
-  Future<void> reportIncomingCallFromMeeting(IsometrikMeeting meeting) async {
+  ///
+  /// When [skipNativeCallKitReport] is true (iOS PushKit already reported to CallKit),
+  /// skips [native.reportIncomingCall] but still runs hangup scheduling and MQTT
+  /// `callRinging` publish so behavior matches the Dart-initiated path.
+  Future<void> reportIncomingCallFromMeeting(
+    IsometrikMeeting meeting, {
+    bool skipNativeCallKitReport = false,
+  }) async {
     final mid = meeting.meetingId?.trim();
     if (mid == null || mid.isEmpty) {
       debugPrint(
@@ -948,7 +1034,10 @@ class IsometrikCallSdk {
     if (_isIncomingCallShown) {
       if (_incomingCallId == mid) {
         // Same call: keep pending meeting updated, but don't re-report UI.
-        _pendingIncomingMeeting = meeting;
+        _pendingIncomingMeeting = _mergeIncomingPendingDetail(
+          meeting,
+          _pendingIncomingMeeting,
+        );
         meetingRouterContext.callDetailsMeetingId = mid;
       }
       return;
@@ -966,21 +1055,24 @@ class IsometrikCallSdk {
     _incomingCallId = mid;
     _lastIncomingCallAnsweredMeetingId = null;
     _lastIncomingCallEndedMeetingId = null;
-    _pendingIncomingMeeting = meeting;
+    _pendingIncomingMeeting =
+        _mergeIncomingPendingDetail(meeting, _pendingIncomingMeeting);
     meetingRouterContext.callDetailsMeetingId = mid;
     meetingRouterContext.outgoingCallPending = false;
     meetingRouterContext.nativeCallActive = true;
     meetingRouterContext.callAnsweredByDeviceId = null;
     try {
-      await native.reportIncomingCall(
-        callerName: _resolveIncomingCallerName(meeting: meeting),
-        callId: mid,
-        hasVideo: meeting.callType != IsometrikLiveCallType.audioCall,
-        metadata: <String, dynamic>{
-          ...meeting.toJson(),
-          'isGroupCall': _isGroupCall(primary: meeting),
-        },
-      );
+      if (!skipNativeCallKitReport) {
+        await native.reportIncomingCall(
+          callerName: _resolveIncomingCallerName(meeting: meeting),
+          callId: mid,
+          hasVideo: meeting.indicatesVideoCall,
+          metadata: <String, dynamic>{
+            ...meeting.toJson(),
+            'isGroupCall': _isGroupCall(primary: meeting),
+          },
+        );
+      }
       final cfg = session.configuration;
       if (cfg != null) {
         await native.scheduleHangup(
@@ -1054,6 +1146,8 @@ class IsometrikCallSdk {
     _pendingIncomingMeeting = null;
     _lastIncomingCallAnsweredMeetingId = null;
     _lastIncomingCallEndedMeetingId = null;
+    _incomingAcceptInProgressMeetingId = null;
+    _incomingAcceptStartedAt = null;
     _lastServerEndedMeetingId = null;
     _clearCallWaitingSnapshot();
     _waitingCallAcceptInProgressMeetingId = null;
@@ -1260,7 +1354,10 @@ class IsometrikCallSdk {
           // PushKit/FCM is the only trigger for incoming UI.
           // MQTT can only refresh pending details for the already-shown call.
           if (_isIncomingCallShown && _incomingCallId == mid) {
-            _pendingIncomingMeeting = meeting;
+            _pendingIncomingMeeting = _mergeIncomingPendingDetail(
+              meeting,
+              _pendingIncomingMeeting,
+            );
             meetingRouterContext.callDetailsMeetingId = mid;
           }
           return;
@@ -1271,7 +1368,10 @@ class IsometrikCallSdk {
         // pending details for the same call id.
         if (_isIncomingCallShown) {
           if (_incomingCallId == mid) {
-            _pendingIncomingMeeting = meeting;
+            _pendingIncomingMeeting = _mergeIncomingPendingDetail(
+              meeting,
+              _pendingIncomingMeeting,
+            );
             meetingRouterContext.callDetailsMeetingId = mid;
           }
           return;
@@ -1295,9 +1395,24 @@ class IsometrikCallSdk {
   Future<void> _handleAutoNativeEvent(IsometrikNativeCallEvent e) async {
     if (e.type == 'incomingVoipPush') {
       final meeting = _meetingFromIncomingVoipNativeEvent(e);
-      if (meeting != null) {
-        await reportIncomingCallFromMeeting(meeting);
+      if (meeting == null) {
+        return;
       }
+      // Native PushKit already called `reportNewIncomingCall` when `nativeCallKitReported`
+      // is true — never report again from Dart or the user sees two CallKit screens.
+      var skipNativeCallKit = e.payload['nativeCallKitReported'] == true;
+      if (!skipNativeCallKit &&
+          defaultTargetPlatform == TargetPlatform.iOS) {
+        skipNativeCallKit = await native.wasCallKitReportedNatively();
+      }
+      final callkitError = (e.payload['callkitError'] as String?)?.trim();
+      if (callkitError != null && callkitError.isNotEmpty) {
+        skipNativeCallKit = false;
+      }
+      await reportIncomingCallFromMeeting(
+        meeting,
+        skipNativeCallKitReport: skipNativeCallKit,
+      );
     } else if (e.type == 'providerReset') {
       try {
         await native.cancelScheduledHangup();
@@ -1349,6 +1464,8 @@ class IsometrikCallSdk {
       }
 
       _lastIncomingCallAnsweredMeetingId = meetingId;
+      _incomingAcceptInProgressMeetingId = meetingId;
+      _incomingAcceptStartedAt = DateTime.now();
       if (_hasCallWaitingSnapshot) {
         _waitingCallAcceptInProgressMeetingId = meetingId;
         _waitingCallAcceptStartedAt = DateTime.now();
@@ -1385,16 +1502,31 @@ class IsometrikCallSdk {
           meetingRouterContext.nativeCallActive = true;
           meetingRouterContext.outgoingCallPending = false;
           final resolvedRtcToken = data.rtcToken ?? pending?.rtcToken;
+          final nativeAnswHasVideo = e.payload['hasVideo'] == true;
           final resolvedCallType = _resolveCallType(
             primary: data,
             secondary: pending,
+            nativeHasVideo: nativeAnswHasVideo,
           );
+          final hasVideoForUi =
+              resolvedCallType != IsometrikLiveCallType.audioCall;
+          var peerName = _resolvePeerName(primary: data, secondary: pending);
+          if (peerName.isEmpty || peerName == 'Unknown') {
+            final fromNative = (e.payload['callerName'] as String?)?.trim();
+            if (fromNative != null && fromNative.isNotEmpty) {
+              peerName = fromNative;
+            }
+          }
+
+          _incomingAcceptInProgressMeetingId = null;
+          _incomingAcceptStartedAt = null;
+
           final controller = IsometrikCallController(
             sdk: this,
             meetingId: resolvedMeetingId,
-            peerName: _resolvePeerName(primary: data, secondary: pending),
+            peerName: peerName,
             isOutgoing: false,
-            hasVideo: resolvedCallType != IsometrikLiveCallType.audioCall,
+            hasVideo: hasVideoForUi,
             rtcToken: resolvedRtcToken,
             peerImageUrl: pending?.initiatorImageUrl,
             initialStatus: IsometrikCallStatus.connecting,
@@ -1408,6 +1540,8 @@ class IsometrikCallSdk {
           _scheduleWaitingAcceptGuardCleanup(resolvedMeetingId);
         case IsometrikFailure(:final error):
           debugPrint('IsometrikCallSdk: auto-handler — accept failed: $error');
+          _incomingAcceptInProgressMeetingId = null;
+          _incomingAcceptStartedAt = null;
           _waitingCallAcceptInProgressMeetingId = null;
           _waitingCallAcceptStartedAt = null;
           await endNativeCall();
@@ -1460,6 +1594,25 @@ class IsometrikCallSdk {
       }
 
       final normalizedMeetingId = contextMeetingId ?? payloadMeetingId;
+
+      // Duplicate CallKit for one VoIP push: dismissing the extra UUID fires
+      // `callEnded` while the user just answered — must not leave/reject the live call.
+      final acceptMid = _incomingAcceptInProgressMeetingId?.trim();
+      final acceptStarted = _incomingAcceptStartedAt;
+      if (acceptMid != null &&
+          acceptMid.isNotEmpty &&
+          acceptStarted != null &&
+          normalizedMeetingId != null &&
+          normalizedMeetingId == acceptMid &&
+          DateTime.now().difference(acceptStarted) <
+              const Duration(seconds: 20)) {
+        debugPrint(
+          'IsometrikCallSdk: ignore callEnded during CallKit accept '
+          '(mid=$acceptMid, duplicate CallKit dismiss)',
+        );
+        return;
+      }
+
       final waitingAcceptMid = _waitingCallAcceptInProgressMeetingId?.trim();
       final waitingTransitionActive =
           _hasCallWaitingSnapshot &&
@@ -1563,16 +1716,26 @@ class IsometrikCallSdk {
     IsometrikNativeCallEvent e,
   ) {
     final rawPayload = e.payload['payload'];
+    IsometrikMeeting? meeting;
     if (rawPayload is Map) {
-      return IsometrikCallSdk.meetingFromVoipPayload(
+      meeting = IsometrikCallSdk.meetingFromVoipPayload(
         Map<String, dynamic>.from(rawPayload),
       );
+    } else {
+      debugPrint(
+        'IsometrikCallSdk: incomingVoipPush unexpected payload shape: '
+        'rawPayloadType=${rawPayload.runtimeType}',
+      );
+      meeting = IsometrikCallSdk.meetingFromVoipPayload(
+        Map<String, dynamic>.from(e.payload),
+      );
     }
-    debugPrint(
-      'IsometrikCallSdk: incomingVoipPush unexpected payload shape: '
-      'rawPayloadType=${rawPayload.runtimeType}',
-    );
-    return IsometrikCallSdk.meetingFromVoipPayload(e.payload);
+    if (meeting == null) return null;
+    final nativeCaller = e.payload['callerName'] as String?;
+    final nativeVideo = e.payload['hasVideo'] == true;
+    return meeting
+        .withVoipNativeCallerHint(nativeCaller)
+        .withNativeHasVideoHint(nativeVideo);
   }
 
   bool _isLocalActorMeetingEvent(IsometrikMeeting meeting) {

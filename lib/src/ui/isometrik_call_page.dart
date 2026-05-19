@@ -128,7 +128,7 @@ class IsometrikCallPage extends StatefulWidget {
         opaque: true,
         transitionDuration: const Duration(milliseconds: 280),
         reverseTransitionDuration: const Duration(milliseconds: 240),
-        pageBuilder: (_, __, ___) =>
+        pageBuilder: (_, _, _) =>
             IsometrikCallPage(controller: controller, config: config),
         transitionsBuilder:
             (
@@ -189,7 +189,8 @@ class IsometrikCallPage extends StatefulWidget {
   State<IsometrikCallPage> createState() => _IsometrikCallPageState();
 }
 
-class _IsometrikCallPageState extends State<IsometrikCallPage> {
+class _IsometrikCallPageState extends State<IsometrikCallPage>
+    with WidgetsBindingObserver {
   bool _endedPopScheduled = false;
   bool _allowNextPop = false;
   bool _showLocalInFullscreen = false;
@@ -245,10 +246,17 @@ class _IsometrikCallPageState extends State<IsometrikCallPage> {
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _IsometrikCallViewRegistry.markVisible(_ctrl.meetingId);
     _ctrl.addListener(_onControllerChanged);
     unawaited(_requestPermissionsOnPageOpen());
     initLocalCamera();
+    // CallKit end while app was backgrounded can open this route already in `ended` state.
+    if (_ctrl.status == IsometrikCallStatus.ended) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) _scheduleAutoPopIfEnded();
+      });
+    }
   }
 
   @override
@@ -261,10 +269,19 @@ class _IsometrikCallPageState extends State<IsometrikCallPage> {
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _IsometrikCallViewRegistry.markHidden(_ctrl.meetingId);
     _ctrl.removeListener(_onControllerChanged);
     _disposeLocalPreviewTrack();
     super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    super.didChangeAppLifecycleState(state);
+    if (state == AppLifecycleState.resumed) {
+      _runAction(_ctrl.refreshIosAudioAfterAppForegrounded, label: 'ios_audio_foreground');
+    }
   }
 
   Future<void> _disposeLocalPreviewTrack() async {
@@ -287,18 +304,22 @@ class _IsometrikCallPageState extends State<IsometrikCallPage> {
 
     setState(() {});
 
-    if (_ctrl.status == IsometrikCallStatus.ended &&
-        _cfg.autoPopOnEnded &&
-        !_endedPopScheduled) {
-      _endedPopScheduled = true;
-      _IsometrikMinimizedCallOverlay.dismiss(_ctrl.meetingId);
-      Future<void>.delayed(_cfg.autoPopDelay, () {
-        if (mounted) {
-          _cfg.onCallEnded?.call();
-          Navigator.of(context).maybePop();
-        }
-      });
+    if (_ctrl.status == IsometrikCallStatus.ended) {
+      _scheduleAutoPopIfEnded();
     }
+  }
+
+  void _scheduleAutoPopIfEnded() {
+    if (_ctrl.status != IsometrikCallStatus.ended) return;
+    if (!_cfg.autoPopOnEnded || _endedPopScheduled) return;
+    _endedPopScheduled = true;
+    _IsometrikMinimizedCallOverlay.dismiss(_ctrl.meetingId);
+    Future<void>.delayed(_cfg.autoPopDelay, () {
+      if (mounted) {
+        _cfg.onCallEnded?.call();
+        Navigator.of(context).maybePop();
+      }
+    });
   }
 
   Future<void> _requestPermissionsOnPageOpen() async {
@@ -311,6 +332,17 @@ class _IsometrikCallPageState extends State<IsometrikCallPage> {
     if (_ctrl.status == IsometrikCallStatus.ended) return true;
     final minimized = await _minimizeCallView();
     return !minimized;
+  }
+
+  /// [PopScope] cannot await in [PopScope.onPopInvokedWithResult]; this mirrors
+  /// the old navigator pop-veto flow by popping when [_onBackPressed] allows it.
+  Future<void> _completeSystemPopIfAllowed(dynamic result) async {
+    if (!mounted) return;
+    final allowPop = await _onBackPressed();
+    if (!mounted) return;
+    if (allowPop) {
+      Navigator.of(context).pop(result);
+    }
   }
 
   void _swapVideoTiles() {
@@ -397,19 +429,23 @@ class _IsometrikCallPageState extends State<IsometrikCallPage> {
 
   Future<bool> _minimizeCallView() async {
     if (_ctrl.isMinimized) return true;
-    final overlayAnchorContext =
-        Navigator.maybeOf(context, rootNavigator: true)?.context ?? context;
 
     // Stop the local preview track before minimizing so the camera hardware
     // is fully released. The minimized overlay renders from the LiveKit room
     // track, which is managed by the controller — not this standalone preview.
     await _disposeLocalPreviewTrack();
+    if (!mounted) return false;
 
     _ctrl.setMinimized(true);
     final popped = await _popCallRoute();
+    if (!mounted) return popped;
     if (!popped) {
       _ctrl.setMinimized(false);
     } else {
+      if (!context.mounted) return popped;
+      final overlayAnchorContext =
+          Navigator.maybeOf(context, rootNavigator: true)?.context ?? context;
+      if (!overlayAnchorContext.mounted) return popped;
       _IsometrikMinimizedCallOverlay.show(
         context: overlayAnchorContext,
         controller: _ctrl,
@@ -427,6 +463,8 @@ class _IsometrikCallPageState extends State<IsometrikCallPage> {
       _allowNextPop = false;
       if (didPop) return true;
     }
+
+    if (!mounted) return false;
 
     final rootNavigator = Navigator.maybeOf(context, rootNavigator: true);
     if (rootNavigator != null && !identical(rootNavigator, pageNavigator)) {
@@ -449,8 +487,12 @@ class _IsometrikCallPageState extends State<IsometrikCallPage> {
     final topInset = mediaPadding.top;
     final bottomInset = mediaPadding.bottom;
 
-    return WillPopScope(
-      onWillPop: _onBackPressed,
+    return PopScope(
+      canPop: _allowNextPop || _ctrl.status == IsometrikCallStatus.ended,
+      onPopInvokedWithResult: (bool didPop, dynamic result) {
+        if (didPop) return;
+        unawaited(_completeSystemPopIfAllowed(result));
+      },
       child: Scaffold(
         backgroundColor: _cfg.backgroundColor,
         body: Stack(
@@ -1496,8 +1538,9 @@ class _IsometrikMinimizedCallOverlay {
                   offset.value = snapped;
                 },
                 onTap: () {
-                  if (_restoringMeetingIds.contains(controller.meetingId))
+                  if (_restoringMeetingIds.contains(controller.meetingId)) {
                     return;
+                  }
                   _restoringMeetingIds.add(controller.meetingId);
                   final restoreOffset = offset.value;
                   controller.setMinimizedWindowOffset(restoreOffset);
@@ -1625,10 +1668,12 @@ class _MinimizedCallWindow extends StatefulWidget {
   State<_MinimizedCallWindow> createState() => _MinimizedCallWindowState();
 }
 
-class _MinimizedCallWindowState extends State<_MinimizedCallWindow> {
+class _MinimizedCallWindowState extends State<_MinimizedCallWindow>
+    with WidgetsBindingObserver {
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     widget.controller.addListener(_onControllerChanged);
   }
 
@@ -1643,8 +1688,19 @@ class _MinimizedCallWindowState extends State<_MinimizedCallWindow> {
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     widget.controller.removeListener(_onControllerChanged);
     super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    super.didChangeAppLifecycleState(state);
+    // Mirrors full-screen [IsometrikCallPage]: PiP has no route lifecycle when
+    // returning from lock screen / background — refresh WebRTC ↔ CallKit audio.
+    if (state == AppLifecycleState.resumed) {
+      unawaited(widget.controller.refreshIosAudioAfterAppForegrounded());
+    }
   }
 
   void _onControllerChanged() {

@@ -1,3 +1,5 @@
+import 'package:flutter/services.dart';
+
 import '../../isometrik_flutter_call_platform_interface.dart';
 import '../configuration/isometrik_call_configuration.dart';
 
@@ -15,6 +17,10 @@ class IsometrikCallDisplayUser {
 }
 
 /// Events emitted by native iOS CallKit/PushKit (and Android no-ops).
+///
+/// **iOS extras:** `callAudioSessionActivated` (CallKit `didActivate` — native audio
+/// coordinator already running; Dart may refresh LiveKit routes), `iosAppBecameActive`
+/// (unlock / app resume).
 class IsometrikNativeCallEvent {
   const IsometrikNativeCallEvent({required this.type, required this.payload});
 
@@ -119,6 +125,99 @@ class IsometrikFlutterCall {
     return IsometrikFlutterCallPlatform.instance.cancelScheduledHangup();
   }
 
+  /// iOS: native VoIP audio coordinator — stable session + main-runloop watchdog.
+  /// **Reuse:** Prefer these over Dart `Future.delayed` when backgrounded / locked.
+  Future<void> beginIosVoipCallAudio({
+    bool hasVideo = false,
+    bool preferSpeaker = false,
+  }) async {
+    try {
+      await IsometrikFlutterCallPlatform.instance.beginIosVoipCallAudio(
+        hasVideo: hasVideo,
+        preferSpeaker: preferSpeaker,
+      );
+    } on MissingPluginException {
+      return;
+    } on PlatformException {
+      return;
+    }
+  }
+
+  Future<void> refreshIosVoipCallAudio({
+    bool hasVideo = false,
+    bool preferSpeaker = false,
+    bool hardReset = false,
+  }) async {
+    try {
+      await IsometrikFlutterCallPlatform.instance.refreshIosVoipCallAudio(
+        hasVideo: hasVideo,
+        preferSpeaker: preferSpeaker,
+        hardReset: hardReset,
+      );
+    } on MissingPluginException {
+      return;
+    } on PlatformException {
+      return;
+    }
+  }
+
+  Future<void> endIosVoipCallAudio() async {
+    try {
+      await IsometrikFlutterCallPlatform.instance.endIosVoipCallAudio();
+    } on MissingPluginException {
+      return;
+    } on PlatformException {
+      return;
+    }
+  }
+
+  /// iOS: stop native session churn after LiveKit `Room.connect` (prevents audio glitch loops).
+  Future<void> handoffIosVoipCallAudioToLiveKit() async {
+    try {
+      await IsometrikFlutterCallPlatform.instance
+          .handoffIosVoipCallAudioToLiveKit();
+    } on MissingPluginException {
+      return;
+    } on PlatformException {
+      return;
+    }
+  }
+
+  /// Legacy alias — prefer [refreshIosVoipCallAudio].
+  Future<void> reactivateIosCallAudioSession({
+    bool hasVideo = false,
+    bool preferSpeaker = false,
+    bool hardReset = false,
+  }) async {
+    try {
+      await IsometrikFlutterCallPlatform.instance.reactivateIosCallAudioSession(
+        hasVideo: hasVideo,
+        preferSpeaker: preferSpeaker,
+        hardReset: hardReset,
+      );
+    } on MissingPluginException {
+      return;
+    } on PlatformException {
+      return;
+    }
+  }
+
+  /// iOS PushKit path may already show CallKit; returns whether to skip Dart-initiated
+  /// [reportIncomingCall]. Safe on all platforms (false when unsupported).
+  Future<bool> wasCallKitReportedNatively() async {
+    try {
+      return await IsometrikFlutterCallPlatform.instance
+          .wasCallKitReportedNatively();
+    } on MissingPluginException {
+      return false;
+    } on PlatformException catch (e) {
+      if (e.code == 'channel-error' || e.code == 'not-implemented') {
+        return false;
+      }
+      return false;
+    }
+  }
+
   Future<Map<String, dynamic>> requestRuntimePermissions({
     required bool requestMicrophone,
     required bool requestCamera,
@@ -135,5 +234,32 @@ class IsometrikFlutterCall {
             .events()
             .map(IsometrikNativeCallEvent.fromMap)
             .asBroadcastStream();
+  }
+
+  /// iOS: reads a **ring buffer** in `UserDefaults` written on each VoIP push (keys only, outcomes).
+  ///
+  /// **`pushkit_delegate_invoked`** rows prove the OS called the PushKit delegate (before main/async);
+  /// **`pushkit`** rows follow after CallKit handling. Inspect after a suspected missed push (`usedFallbackCallId`,
+  /// `callKitError`, `payloadTopLevelKeys`). Cleared via [clearIosPushKitDiagnostics]. Non‑iOS: empty list.
+  Future<List<Map<String, dynamic>>> getIosPushKitDiagnostics() async {
+    try {
+      return await IsometrikFlutterCallPlatform.instance
+          .getIosPushKitDiagnostics();
+    } on MissingPluginException {
+      return <Map<String, dynamic>>[];
+    } on PlatformException {
+      return <Map<String, dynamic>>[];
+    }
+  }
+
+  /// Clears persisted VoIP diagnostics (iOS); no‑op elsewhere.
+  Future<void> clearIosPushKitDiagnostics() async {
+    try {
+      await IsometrikFlutterCallPlatform.instance.clearIosPushKitDiagnostics();
+    } on MissingPluginException {
+      return;
+    } on PlatformException {
+      return;
+    }
   }
 }

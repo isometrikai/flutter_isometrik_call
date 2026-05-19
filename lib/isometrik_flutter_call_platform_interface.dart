@@ -99,6 +99,55 @@ abstract class IsometrikFlutterCallPlatform extends PlatformInterface {
     );
   }
 
+  /// iOS: start native VoIP audio coordinator + 1s watchdog (CallKit `didActivate` also calls this).
+  /// No-op on other platforms.
+  Future<void> beginIosVoipCallAudio({
+    bool hasVideo = false,
+    bool preferSpeaker = false,
+  }) {
+    throw UnimplementedError('beginIosVoipCallAudio() has not been implemented.');
+  }
+
+  /// iOS: idempotent `RTCAudioSession` tune-up. Use [hardReset] once after LiveKit local tracks exist.
+  Future<void> refreshIosVoipCallAudio({
+    bool hasVideo = false,
+    bool preferSpeaker = false,
+    bool hardReset = false,
+  }) {
+    throw UnimplementedError('refreshIosVoipCallAudio() has not been implemented.');
+  }
+
+  /// iOS: stop native audio watchdog when the call ends.
+  Future<void> endIosVoipCallAudio() {
+    throw UnimplementedError('endIosVoipCallAudio() has not been implemented.');
+  }
+
+  /// iOS: LiveKit owns `RTCAudioSession` after connect — stops category/mode overrides.
+  Future<void> handoffIosVoipCallAudioToLiveKit() {
+    throw UnimplementedError(
+      'handoffIosVoipCallAudioToLiveKit() has not been implemented.',
+    );
+  }
+
+  /// iOS only: legacy alias for [refreshIosVoipCallAudio]. No-op on other platforms.
+  Future<void> reactivateIosCallAudioSession({
+    bool hasVideo = false,
+    bool preferSpeaker = false,
+    bool hardReset = false,
+  }) {
+    throw UnimplementedError(
+      'reactivateIosCallAudioSession() has not been implemented.',
+    );
+  }
+
+  /// iOS: whether PushKit already reported the incoming call to CallKit for the
+  /// current VoIP push. Reading clears the latch on native. Other platforms: false.
+  Future<bool> wasCallKitReportedNatively() {
+    throw UnimplementedError(
+      'wasCallKitReportedNatively() has not been implemented.',
+    );
+  }
+
   /// Android runtime permissions request (camera / microphone).
   Future<Map<String, dynamic>> requestRuntimePermissions({
     required bool requestMicrophone,
@@ -111,5 +160,20 @@ abstract class IsometrikFlutterCallPlatform extends PlatformInterface {
 
   Stream<Map<String, dynamic>> events() {
     throw UnimplementedError('events() has not been implemented.');
+  }
+
+  /// iOS: persisted ring buffer for last VoIP / CallKit outcomes (survives app restart).
+  /// Other platforms return an empty list.
+  Future<List<Map<String, dynamic>>> getIosPushKitDiagnostics() {
+    throw UnimplementedError(
+      'getIosPushKitDiagnostics() has not been implemented.',
+    );
+  }
+
+  /// iOS only: clears [getIosPushKitDiagnostics] storage. No-op elsewhere.
+  Future<void> clearIosPushKitDiagnostics() {
+    throw UnimplementedError(
+      'clearIosPushKitDiagnostics() has not been implemented.',
+    );
   }
 }

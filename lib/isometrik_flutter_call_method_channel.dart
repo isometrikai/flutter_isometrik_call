@@ -111,6 +111,63 @@ class MethodChannelIsometrikFlutterCall extends IsometrikFlutterCallPlatform {
   }
 
   @override
+  Future<void> beginIosVoipCallAudio({
+    bool hasVideo = false,
+    bool preferSpeaker = false,
+  }) async {
+    await methodChannel.invokeMethod<void>('iosBeginVoipCallAudio', {
+      'hasVideo': hasVideo,
+      'preferSpeaker': preferSpeaker,
+    });
+  }
+
+  @override
+  Future<void> refreshIosVoipCallAudio({
+    bool hasVideo = false,
+    bool preferSpeaker = false,
+    bool hardReset = false,
+  }) async {
+    await methodChannel.invokeMethod<void>('iosRefreshVoipCallAudio', {
+      'hasVideo': hasVideo,
+      'preferSpeaker': preferSpeaker,
+      'hardReset': hardReset,
+    });
+  }
+
+  @override
+  Future<void> endIosVoipCallAudio() async {
+    await methodChannel.invokeMethod<void>('iosEndVoipCallAudio');
+  }
+
+  @override
+  Future<void> handoffIosVoipCallAudioToLiveKit() async {
+    await methodChannel.invokeMethod<void>('iosHandoffVoipCallAudioToLiveKit');
+  }
+
+  @override
+  Future<void> reactivateIosCallAudioSession({
+    bool hasVideo = false,
+    bool preferSpeaker = false,
+    bool hardReset = false,
+  }) async {
+    await methodChannel.invokeMethod<void>('reactivateIosCallAudioSession', {
+      'hasVideo': hasVideo,
+      'preferSpeaker': preferSpeaker,
+      'hardReset': hardReset,
+    });
+  }
+
+  @override
+  Future<bool> wasCallKitReportedNatively() async {
+    final dynamic r = await methodChannel.invokeMethod<dynamic>(
+      'wasCallKitReportedNatively',
+    );
+    if (r is bool) return r;
+    if (r is num) return r != 0;
+    return false;
+  }
+
+  @override
   Future<Map<String, dynamic>> requestRuntimePermissions({
     required bool requestMicrophone,
     required bool requestCamera,
@@ -123,6 +180,27 @@ class MethodChannelIsometrikFlutterCall extends IsometrikFlutterCallPlatform {
       },
     );
     return Map<String, dynamic>.from(response ?? <String, dynamic>{});
+  }
+
+  @override
+  Future<List<Map<String, dynamic>>> getIosPushKitDiagnostics() async {
+    final dynamic rows = await methodChannel.invokeMethod<dynamic>(
+      'getIosPushKitDiagnostics',
+    );
+    if (rows is! List<dynamic>) {
+      return <Map<String, dynamic>>[];
+    }
+    return rows
+        .map(
+          (dynamic e) =>
+              Map<String, dynamic>.from(e as Map<dynamic, dynamic>),
+        )
+        .toList();
+  }
+
+  @override
+  Future<void> clearIosPushKitDiagnostics() async {
+    await methodChannel.invokeMethod<void>('clearIosPushKitDiagnostics');
   }
 
   @override
