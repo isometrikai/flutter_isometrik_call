@@ -111,9 +111,49 @@ class MethodChannelIsometrikFlutterCall extends IsometrikFlutterCallPlatform {
   }
 
   @override
-  Future<void> reactivateIosCallAudioSession({bool hasVideo = false}) async {
+  Future<void> beginIosVoipCallAudio({
+    bool hasVideo = false,
+    bool preferSpeaker = false,
+  }) async {
+    await methodChannel.invokeMethod<void>('iosBeginVoipCallAudio', {
+      'hasVideo': hasVideo,
+      'preferSpeaker': preferSpeaker,
+    });
+  }
+
+  @override
+  Future<void> refreshIosVoipCallAudio({
+    bool hasVideo = false,
+    bool preferSpeaker = false,
+    bool hardReset = false,
+  }) async {
+    await methodChannel.invokeMethod<void>('iosRefreshVoipCallAudio', {
+      'hasVideo': hasVideo,
+      'preferSpeaker': preferSpeaker,
+      'hardReset': hardReset,
+    });
+  }
+
+  @override
+  Future<void> endIosVoipCallAudio() async {
+    await methodChannel.invokeMethod<void>('iosEndVoipCallAudio');
+  }
+
+  @override
+  Future<void> handoffIosVoipCallAudioToLiveKit() async {
+    await methodChannel.invokeMethod<void>('iosHandoffVoipCallAudioToLiveKit');
+  }
+
+  @override
+  Future<void> reactivateIosCallAudioSession({
+    bool hasVideo = false,
+    bool preferSpeaker = false,
+    bool hardReset = false,
+  }) async {
     await methodChannel.invokeMethod<void>('reactivateIosCallAudioSession', {
       'hasVideo': hasVideo,
+      'preferSpeaker': preferSpeaker,
+      'hardReset': hardReset,
     });
   }
 

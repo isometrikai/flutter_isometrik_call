@@ -18,9 +18,9 @@ class IsometrikCallDisplayUser {
 
 /// Events emitted by native iOS CallKit/PushKit (and Android no-ops).
 ///
-/// **iOS extras:** `callAudioSessionActivated` (CallKit `didActivate` — use for early
-/// WebRTC recovery), `iosAppBecameActive` (unlock / app resume — paired with Flutter
-/// lifecycle when VoIP cold-starts or PiP has no observer).
+/// **iOS extras:** `callAudioSessionActivated` (CallKit `didActivate` — native audio
+/// coordinator already running; Dart may refresh LiveKit routes), `iosAppBecameActive`
+/// (unlock / app resume).
 class IsometrikNativeCallEvent {
   const IsometrikNativeCallEvent({required this.type, required this.payload});
 
@@ -125,12 +125,75 @@ class IsometrikFlutterCall {
     return IsometrikFlutterCallPlatform.instance.cancelScheduledHangup();
   }
 
-  /// iOS: posts a synthetic `AVAudioSession` interruption cycle so WebRTC restarts capture/play
-  /// after CallKit / background wake. No-op on Android and unsupported platforms.
-  Future<void> reactivateIosCallAudioSession({bool hasVideo = false}) async {
+  /// iOS: native VoIP audio coordinator — stable session + main-runloop watchdog.
+  /// **Reuse:** Prefer these over Dart `Future.delayed` when backgrounded / locked.
+  Future<void> beginIosVoipCallAudio({
+    bool hasVideo = false,
+    bool preferSpeaker = false,
+  }) async {
+    try {
+      await IsometrikFlutterCallPlatform.instance.beginIosVoipCallAudio(
+        hasVideo: hasVideo,
+        preferSpeaker: preferSpeaker,
+      );
+    } on MissingPluginException {
+      return;
+    } on PlatformException {
+      return;
+    }
+  }
+
+  Future<void> refreshIosVoipCallAudio({
+    bool hasVideo = false,
+    bool preferSpeaker = false,
+    bool hardReset = false,
+  }) async {
+    try {
+      await IsometrikFlutterCallPlatform.instance.refreshIosVoipCallAudio(
+        hasVideo: hasVideo,
+        preferSpeaker: preferSpeaker,
+        hardReset: hardReset,
+      );
+    } on MissingPluginException {
+      return;
+    } on PlatformException {
+      return;
+    }
+  }
+
+  Future<void> endIosVoipCallAudio() async {
+    try {
+      await IsometrikFlutterCallPlatform.instance.endIosVoipCallAudio();
+    } on MissingPluginException {
+      return;
+    } on PlatformException {
+      return;
+    }
+  }
+
+  /// iOS: stop native session churn after LiveKit `Room.connect` (prevents audio glitch loops).
+  Future<void> handoffIosVoipCallAudioToLiveKit() async {
+    try {
+      await IsometrikFlutterCallPlatform.instance
+          .handoffIosVoipCallAudioToLiveKit();
+    } on MissingPluginException {
+      return;
+    } on PlatformException {
+      return;
+    }
+  }
+
+  /// Legacy alias — prefer [refreshIosVoipCallAudio].
+  Future<void> reactivateIosCallAudioSession({
+    bool hasVideo = false,
+    bool preferSpeaker = false,
+    bool hardReset = false,
+  }) async {
     try {
       await IsometrikFlutterCallPlatform.instance.reactivateIosCallAudioSession(
         hasVideo: hasVideo,
+        preferSpeaker: preferSpeaker,
+        hardReset: hardReset,
       );
     } on MissingPluginException {
       return;

@@ -99,9 +99,42 @@ abstract class IsometrikFlutterCallPlatform extends PlatformInterface {
     );
   }
 
-  /// iOS only: run WebRTC/LiveKit-friendly audio session reactivation (synthetic interruption
-  /// cycle). No-op on other platforms. Safe to call after the LiveKit room connects.
-  Future<void> reactivateIosCallAudioSession({bool hasVideo = false}) {
+  /// iOS: start native VoIP audio coordinator + 1s watchdog (CallKit `didActivate` also calls this).
+  /// No-op on other platforms.
+  Future<void> beginIosVoipCallAudio({
+    bool hasVideo = false,
+    bool preferSpeaker = false,
+  }) {
+    throw UnimplementedError('beginIosVoipCallAudio() has not been implemented.');
+  }
+
+  /// iOS: idempotent `RTCAudioSession` tune-up. Use [hardReset] once after LiveKit local tracks exist.
+  Future<void> refreshIosVoipCallAudio({
+    bool hasVideo = false,
+    bool preferSpeaker = false,
+    bool hardReset = false,
+  }) {
+    throw UnimplementedError('refreshIosVoipCallAudio() has not been implemented.');
+  }
+
+  /// iOS: stop native audio watchdog when the call ends.
+  Future<void> endIosVoipCallAudio() {
+    throw UnimplementedError('endIosVoipCallAudio() has not been implemented.');
+  }
+
+  /// iOS: LiveKit owns `RTCAudioSession` after connect — stops category/mode overrides.
+  Future<void> handoffIosVoipCallAudioToLiveKit() {
+    throw UnimplementedError(
+      'handoffIosVoipCallAudioToLiveKit() has not been implemented.',
+    );
+  }
+
+  /// iOS only: legacy alias for [refreshIosVoipCallAudio]. No-op on other platforms.
+  Future<void> reactivateIosCallAudioSession({
+    bool hasVideo = false,
+    bool preferSpeaker = false,
+    bool hardReset = false,
+  }) {
     throw UnimplementedError(
       'reactivateIosCallAudioSession() has not been implemented.',
     );

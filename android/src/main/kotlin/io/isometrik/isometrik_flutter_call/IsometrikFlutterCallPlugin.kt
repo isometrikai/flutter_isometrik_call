@@ -127,6 +127,10 @@ class IsometrikFlutterCallPlugin :
                 result.success(false)
             }
 
+            "iosBeginVoipCallAudio",
+            "iosRefreshVoipCallAudio",
+            "iosEndVoipCallAudio",
+            "iosHandoffVoipCallAudioToLiveKit",
             "reactivateIosCallAudioSession" -> {
                 // iOS-only; Android uses MODE_IN_COMMUNICATION on accept + LiveKit audio management.
                 result.success(null)

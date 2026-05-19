@@ -79,20 +79,62 @@ class IsometrikMeeting {
       String v => v.toLowerCase() == 'true' || v == '1',
       _ => null,
     };
-    final initiatorName = asString(
-      json['initiatorName'] ??
-          json['initiatorUserName'] ??
-          json['createdByName'] ??
-          json['callerName'] ??
-          json['userName'] ??
-          json['memberName'],
+    bool? boolFromPayload(dynamic v) {
+      if (v == null) return null;
+      if (v is bool) return v;
+      if (v is int) return v != 0;
+      if (v is String) {
+        final n = v.trim().toLowerCase();
+        if (n == 'true' || n == '1') return true;
+        if (n == 'false' || n == '0') return false;
+      }
+      return null;
+    }
+    final payloadHasVideo = boolFromPayload(
+      json['hasVideo'] ?? json['has_video'] ?? json['isVideo'] ?? json['is_video'],
     );
+    // Align with iOS `resolvedVoipCallerDisplayName`: nested `user` objects are common in VoIP JSON.
+    Map<String, dynamic>? userMap;
+    final userRaw = json['user'];
+    if (userRaw is Map) {
+      userMap = Map<String, dynamic>.from(userRaw);
+    }
+    final fromNestedUser = userMap == null
+        ? null
+        : asString(
+            userMap['userName'] ??
+                userMap['name'] ??
+                userMap['displayName'] ??
+                userMap['callerName'],
+          );
+    final initiatorName = asString(
+          json['initiatorName'] ??
+              json['initiatorUserName'] ??
+              json['createdByName'] ??
+              json['callerName'] ??
+              json['userName'] ??
+              json['memberName'] ??
+              json['displayName'] ??
+              json['display_name'] ??
+              json['name'] ??
+              json['title'] ??
+              json['label'],
+        ) ??
+        fromNestedUser;
     final initiatorIdentifier = asString(
       json['initiatorIdentifier'] ?? json['initiatorId'] ?? json['callerId'],
     );
     final rtcToken = asString(rawRtcToken);
     final meetingId = asString(rawMeetingId);
-    final customType = asString(rawCustomType);
+    var customType = asString(rawCustomType);
+    var resolvedAudioOnly = parsedAudioOnly;
+    // VoIP pushes often omit customType but include hasVideo — align with iOS CallKit.
+    if ((customType == null || customType.isEmpty) && payloadHasVideo == true) {
+      customType = IsometrikLiveCallType.videoCall.apiValue;
+      resolvedAudioOnly = false;
+    } else if (resolvedAudioOnly == null && payloadHasVideo == false) {
+      resolvedAudioOnly = true;
+    }
 
     return IsometrikMeeting(
       rtcToken: rtcToken,
@@ -131,9 +173,16 @@ class IsometrikMeeting {
       senderId: asString(json['senderId']),
       body: asString(json['body']),
       customType: customType,
-      audioOnly: parsedAudioOnly,
+      audioOnly: resolvedAudioOnly,
       creationTime: asInt(json['creationTime']),
     );
+  }
+
+  /// True when REST/MQTT/VoIP payload indicates a video session (not only CallKit `hasVideo`).
+  bool get indicatesVideoCall {
+    if (callType == IsometrikLiveCallType.videoCall) return true;
+    if (audioOnly == false) return true;
+    return false;
   }
 
   final String? rtcToken;
@@ -180,6 +229,91 @@ class IsometrikMeeting {
 
   IsometrikMeetingAction get meetingAction =>
       IsometrikMeetingAction.fromRaw(action);
+
+  /// When native CallKit already resolved a display string (e.g. PushKit banner) but the JSON map
+  /// has no initiator/sender name fields, copy that string into [initiatorName] so in-app UI matches.
+  ///
+  /// **Reuse:** [IsometrikCallSdk] VoIP path + MQTT detail refresh (preserve prior hint when server omits name).
+  IsometrikMeeting withVoipNativeCallerHint(String? nativeResolvedCallerName) {
+    final hint = nativeResolvedCallerName?.trim();
+    if (hint == null || hint.isEmpty) return this;
+    final hasMeaningfulName = <String?>[
+      initiatorName,
+      senderName,
+    ].any((s) => s != null && s.trim().isNotEmpty);
+    if (hasMeaningfulName) return this;
+    return IsometrikMeeting(
+      rtcToken: rtcToken,
+      uid: uid,
+      action: action,
+      createdBy: createdBy,
+      userId: userId,
+      members: members,
+      meetingImageUrl: meetingImageUrl,
+      meetingId: meetingId,
+      meetingDescription: meetingDescription,
+      initiatorName: hint,
+      initiatorImageUrl: initiatorImageUrl,
+      initiatorIdentifier: initiatorIdentifier,
+      senderName: senderName,
+      senderId: senderId,
+      body: body,
+      customType: customType,
+      audioOnly: audioOnly,
+      creationTime: creationTime,
+    );
+  }
+
+  /// Native CallKit reported `hasVideo` while JSON omitted [customType] / [audioOnly] — treat as video.
+  IsometrikMeeting withNativeHasVideoHint(bool nativeHasVideo) {
+    if (!nativeHasVideo && !indicatesVideoCall) return this;
+    if (indicatesVideoCall) return this;
+    return IsometrikMeeting(
+      rtcToken: rtcToken,
+      uid: uid,
+      action: action,
+      createdBy: createdBy,
+      userId: userId,
+      members: members,
+      meetingImageUrl: meetingImageUrl,
+      meetingId: meetingId,
+      meetingDescription: meetingDescription,
+      initiatorName: initiatorName,
+      initiatorImageUrl: initiatorImageUrl,
+      initiatorIdentifier: initiatorIdentifier,
+      senderName: senderName,
+      senderId: senderId,
+      body: body,
+      customType: IsometrikLiveCallType.videoCall.apiValue,
+      audioOnly: false,
+      creationTime: creationTime,
+    );
+  }
+
+  /// Force video call metadata when payload flags were sparse (VoIP / accept API).
+  IsometrikMeeting withVideoCallForced() {
+    if (indicatesVideoCall) return this;
+    return IsometrikMeeting(
+      rtcToken: rtcToken,
+      uid: uid,
+      action: action,
+      createdBy: createdBy,
+      userId: userId,
+      members: members,
+      meetingImageUrl: meetingImageUrl,
+      meetingId: meetingId,
+      meetingDescription: meetingDescription,
+      initiatorName: initiatorName,
+      initiatorImageUrl: initiatorImageUrl,
+      initiatorIdentifier: initiatorIdentifier,
+      senderName: senderName,
+      senderId: senderId,
+      body: body,
+      customType: IsometrikLiveCallType.videoCall.apiValue,
+      audioOnly: false,
+      creationTime: creationTime,
+    );
+  }
 
   Map<String, dynamic> toJson() => <String, dynamic>{
     if (rtcToken != null) 'rtcToken': rtcToken,

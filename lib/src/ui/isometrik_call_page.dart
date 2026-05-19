@@ -251,6 +251,12 @@ class _IsometrikCallPageState extends State<IsometrikCallPage>
     _ctrl.addListener(_onControllerChanged);
     unawaited(_requestPermissionsOnPageOpen());
     initLocalCamera();
+    // CallKit end while app was backgrounded can open this route already in `ended` state.
+    if (_ctrl.status == IsometrikCallStatus.ended) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) _scheduleAutoPopIfEnded();
+      });
+    }
   }
 
   @override
@@ -298,18 +304,22 @@ class _IsometrikCallPageState extends State<IsometrikCallPage>
 
     setState(() {});
 
-    if (_ctrl.status == IsometrikCallStatus.ended &&
-        _cfg.autoPopOnEnded &&
-        !_endedPopScheduled) {
-      _endedPopScheduled = true;
-      _IsometrikMinimizedCallOverlay.dismiss(_ctrl.meetingId);
-      Future<void>.delayed(_cfg.autoPopDelay, () {
-        if (mounted) {
-          _cfg.onCallEnded?.call();
-          Navigator.of(context).maybePop();
-        }
-      });
+    if (_ctrl.status == IsometrikCallStatus.ended) {
+      _scheduleAutoPopIfEnded();
     }
+  }
+
+  void _scheduleAutoPopIfEnded() {
+    if (_ctrl.status != IsometrikCallStatus.ended) return;
+    if (!_cfg.autoPopOnEnded || _endedPopScheduled) return;
+    _endedPopScheduled = true;
+    _IsometrikMinimizedCallOverlay.dismiss(_ctrl.meetingId);
+    Future<void>.delayed(_cfg.autoPopDelay, () {
+      if (mounted) {
+        _cfg.onCallEnded?.call();
+        Navigator.of(context).maybePop();
+      }
+    });
   }
 
   Future<void> _requestPermissionsOnPageOpen() async {

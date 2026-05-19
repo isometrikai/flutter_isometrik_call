@@ -97,9 +97,14 @@ public class IsometrikFlutterCallPlugin: NSObject, FlutterPlugin, FlutterStreamH
   /// Last known call uses video — drives `AVAudioSession` mode during WebRTC reactivation.
   private var activeCallHasVideo: Bool = false
 
+  /// CallKit banner text last shown for an **incoming** ring — echoed on `callAnswered` so Flutter can
+  /// render the same name when REST accept bodies omit initiator fields (common on cold VoIP wake).
+  private var lastCallKitIncomingDisplayName: String?
+
   /// Fires every foreground transition — Dart uses this when the in-call UI has no
   /// [WidgetsBindingObserver] (e.g. locked device + minimized PiP, or terminated → VoIP wake).
   private var didBecomeActiveObserver: NSObjectProtocol?
+  private var audioRouteChangeObserver: NSObjectProtocol?
 
   public static func register(with registrar: FlutterPluginRegistrar) {
     let methodChannel = FlutterMethodChannel(
@@ -130,6 +135,32 @@ public class IsometrikFlutterCallPlugin: NSObject, FlutterPlugin, FlutterStreamH
     /// **Critical:** `PKPushRegistry` must exist early (before Dart runs `registerForVoipPushes`), or a
     /// VoIP wake on a terminated app can miss the delegate and violate PushKit lifecycle expectations.
     instance.ensureVoipPushRegistryConfigured()
+    // Native VoIP audio watchdog — does not rely on Flutter timers when backgrounded / locked.
+    IsometrikVoipAudioCoordinator.shared.isCallKitCallActive = { [weak instance] in
+      instance?.activeCallUUID != nil
+    }
+    instance.installAudioRouteChangeObserver()
+  }
+
+  private func installAudioRouteChangeObserver() {
+    if audioRouteChangeObserver != nil { return }
+    audioRouteChangeObserver = NotificationCenter.default.addObserver(
+      forName: AVAudioSession.routeChangeNotification,
+      object: AVAudioSession.sharedInstance(),
+      queue: .main
+    ) { [weak self] _ in
+      self?.emitSpeakerRouteFromAudioSession()
+    }
+  }
+
+  /// Sync Dart UI when user changes route from Control Center / headset connect.
+  private func emitSpeakerRouteFromAudioSession() {
+    guard activeCallUUID != nil else { return }
+    let onSpeaker = IsometrikVoipAudioCoordinator.shared.isBuiltInSpeakerActive()
+    sendEvent(type: "speakerUpdated", payload: [
+      "isSpeakerOn": onSpeaker,
+      "callId": activeCallId as Any,
+    ])
   }
 
   public func onListen(withArguments arguments: Any?, eventSink events: @escaping FlutterEventSink) -> FlutterError? {
@@ -205,12 +236,43 @@ public class IsometrikFlutterCallPlugin: NSObject, FlutterPlugin, FlutterStreamH
     case "wasCallKitReportedNatively":
       result(nativeCallKitReported)
       nativeCallKitReported = false
-    case "reactivateIosCallAudioSession":
+    case "iosBeginVoipCallAudio":
       let args = call.arguments as? [String: Any] ?? [:]
-      if let hv = args["hasVideo"] as? Bool {
-        activeCallHasVideo = hv
-      }
-      reactivateAudioSessionForWebRTC()
+      if let hv = args["hasVideo"] as? Bool { activeCallHasVideo = hv }
+      let preferSpeaker = args["preferSpeaker"] as? Bool ?? activeCallHasVideo
+      IsometrikVoipAudioCoordinator.shared.beginCall(
+        hasVideo: activeCallHasVideo,
+        preferSpeaker: preferSpeaker
+      )
+      result(nil)
+    case "iosRefreshVoipCallAudio":
+      let args = call.arguments as? [String: Any] ?? [:]
+      if let hv = args["hasVideo"] as? Bool { activeCallHasVideo = hv }
+      let preferSpeaker = args["preferSpeaker"] as? Bool ?? activeCallHasVideo
+      let hardReset = args["hardReset"] as? Bool ?? false
+      IsometrikVoipAudioCoordinator.shared.refresh(
+        hasVideo: activeCallHasVideo,
+        preferSpeaker: preferSpeaker,
+        hardReset: hardReset
+      )
+      result(nil)
+    case "iosEndVoipCallAudio":
+      IsometrikVoipAudioCoordinator.shared.endCall()
+      result(nil)
+    case "iosHandoffVoipCallAudioToLiveKit":
+      IsometrikVoipAudioCoordinator.shared.handoffToLiveKit()
+      result(nil)
+    case "reactivateIosCallAudioSession":
+      // Legacy Dart API — maps to refresh (prefer `iosRefreshVoipCallAudio` + `hardReset`).
+      let args = call.arguments as? [String: Any] ?? [:]
+      if let hv = args["hasVideo"] as? Bool { activeCallHasVideo = hv }
+      let preferSpeaker = args["preferSpeaker"] as? Bool ?? activeCallHasVideo
+      let hardReset = args["hardReset"] as? Bool ?? false
+      IsometrikVoipAudioCoordinator.shared.refresh(
+        hasVideo: activeCallHasVideo,
+        preferSpeaker: preferSpeaker,
+        hardReset: hardReset
+      )
       result(nil)
     case "getIosPushKitDiagnostics":
       let rows = IsometrikPushKitDiagnosticsStore.read()
@@ -304,6 +366,7 @@ public class IsometrikFlutterCallPlugin: NSObject, FlutterPlugin, FlutterStreamH
   }
 
   private func endCall(uuid: UUID, completion: (() -> Void)? = nil) {
+    IsometrikVoipAudioCoordinator.shared.endCall()
     let endedCallId = callIdForAction(uuid: uuid)
     if isSimulatorEnvironment() {
       _ = uuid
@@ -371,6 +434,13 @@ public class IsometrikFlutterCallPlugin: NSObject, FlutterPlugin, FlutterStreamH
     ])
   }
 
+  private func rememberIncomingCallKitDisplayName(_ raw: String) {
+    let t = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+    if !t.isEmpty {
+      lastCallKitIncomingDisplayName = t
+    }
+  }
+
   private func reportIncomingCall(
     callerName: String,
     callId: String,
@@ -385,6 +455,7 @@ public class IsometrikFlutterCallPlugin: NSObject, FlutterPlugin, FlutterStreamH
       activeCallUUID = uuid
       activeCallId = callId
       activeCallHasVideo = hasVideo
+      rememberIncomingCallKitDisplayName(callerName)
       sendEvent(type: "incomingCallReported", payload: [
         "callId": callId,
         "callerName": callerName,
@@ -409,6 +480,7 @@ public class IsometrikFlutterCallPlugin: NSObject, FlutterPlugin, FlutterStreamH
       self?.activeCallUUID = uuid
       self?.activeCallId = callId
       self?.activeCallHasVideo = hasVideo
+      self?.rememberIncomingCallKitDisplayName(callerName)
       self?.sendEvent(type: "incomingCallReported", payload: [
         "callId": callId,
         "callerName": callerName,
@@ -457,6 +529,7 @@ public class IsometrikFlutterCallPlugin: NSObject, FlutterPlugin, FlutterStreamH
       outgoingCallUUID = uuid
       activeCallId = callId
       activeCallHasVideo = hasVideo
+      lastCallKitIncomingDisplayName = nil
       sendEvent(type: "outgoingCallStarted", payload: [
         "callId": callId,
         "calleeName": calleeName,
@@ -479,6 +552,7 @@ public class IsometrikFlutterCallPlugin: NSObject, FlutterPlugin, FlutterStreamH
         return
       }
       self?.provider.reportOutgoingCall(with: uuid, startedConnectingAt: Date())
+      self?.lastCallKitIncomingDisplayName = nil
       self?.activeCallUUID = uuid
       self?.outgoingCallUUID = uuid
       self?.activeCallId = callId
@@ -527,15 +601,31 @@ public class IsometrikFlutterCallPlugin: NSObject, FlutterPlugin, FlutterStreamH
   }
 
   private func setSpeaker(_ isSpeakerOn: Bool, result: @escaping FlutterResult) {
-    do {
-      try AVAudioSession.sharedInstance().setCategory(.playAndRecord, mode: .voiceChat, options: [.allowBluetooth])
-      try AVAudioSession.sharedInstance().setActive(true)
-      try AVAudioSession.sharedInstance().overrideOutputAudioPort(isSpeakerOn ? .speaker : .none)
-      sendEvent(type: "speakerUpdated", payload: ["isSpeakerOn": isSpeakerOn, "callId": activeCallId as Any])
-      result(nil)
-    } catch {
-      result(FlutterError(code: "audio_error", message: error.localizedDescription, details: nil))
+    IsometrikVoipAudioCoordinator.shared.setPreferSpeaker(isSpeakerOn)
+    sendEvent(type: "speakerUpdated", payload: ["isSpeakerOn": isSpeakerOn, "callId": activeCallId as Any])
+    result(nil)
+  }
+
+  /// Matches Dart [IsometrikMeeting.indicatesVideoCall] / VoIP JSON variants.
+  private static func payloadIndicatesVideo(_ payload: [String: Any]) -> Bool {
+    if let v = payload["hasVideo"] as? Bool, v { return true }
+    if let v = payload["has_video"] as? Bool, v { return true }
+    if let v = payload["isVideo"] as? Bool, v { return true }
+    if let v = payload["is_video"] as? Bool, v { return true }
+    if let v = payload["hasVideo"] as? Int, v != 0 { return true }
+    if let v = payload["has_video"] as? Int, v != 0 { return true }
+    if let v = payload["audioOnly"] as? Bool, !v { return true }
+    if let v = payload["audioOnly"] as? Int, v == 0 { return true }
+    let typeKeys = ["customType", "callType", "type"]
+    for key in typeKeys {
+      guard let raw = payload[key] as? String else { continue }
+      let n = raw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        .replacingOccurrences(of: "[^a-z0-9]", with: "", options: .regularExpression)
+      if n.contains("video") && !n.contains("audioonly") {
+        return true
+      }
     }
+    return false
   }
 
   private func sendEvent(type: String, payload: [String: Any]) {
@@ -782,13 +872,7 @@ public class IsometrikFlutterCallPlugin: NSObject, FlutterPlugin, FlutterStreamH
     let usedFallbackCallId = explicitCallId == nil
     let callId = explicitCallId ?? UUID().uuidString
 
-    let hasVideo: Bool = {
-      if let v = payloadData["hasVideo"] as? Bool { return v }
-      if let v = payloadData["has_video"] as? Bool { return v }
-      if let v = payloadData["isVideo"] as? Bool { return v }
-      if let v = payloadData["hasVideo"] as? Int { return v != 0 }
-      return false
-    }()
+    let hasVideo = Self.payloadIndicatesVideo(payloadData)
 
     activeCallHasVideo = hasVideo
 
@@ -872,6 +956,7 @@ public class IsometrikFlutterCallPlugin: NSObject, FlutterPlugin, FlutterStreamH
         self.activeCallId = callId
       }
       self.nativeCallKitReported = true
+      self.rememberIncomingCallKitDisplayName(callerName)
 
       completeVoipPushOnce()
       IsometrikPushKitDiagnosticsStore.append(record: Self.makeVoipDiagRecord(
@@ -894,6 +979,8 @@ public class IsometrikFlutterCallPlugin: NSObject, FlutterPlugin, FlutterStreamH
         "callId": callId,
         "callerName": callerName,
         "hasVideo": hasVideo,
+        // Dart must not call `reportIncomingCall` again when this is true (avoids 2 CallKit UIs).
+        "nativeCallKitReported": true,
       ])
     }
   }
@@ -938,71 +1025,6 @@ public class IsometrikFlutterCallPlugin: NSObject, FlutterPlugin, FlutterStreamH
     return row
   }
 
-  /// WebRTC's `RTCAudioSession` observes `AVAudioSession.interruptionNotification`. A synthetic
-  /// `.began` then `.ended(.shouldResume)` cycle restarts the audio unit when CallKit / background
-  /// wake leaves capture or playback stuck (no mic / no remote audio).
-  private func reactivateAudioSessionForWebRTC() {
-    let session = AVAudioSession.sharedInstance()
-    let hasVideo = activeCallHasVideo
-    NSLog(
-      "[ISMCall] reactivateAudioSession hasVideo=\(hasVideo) category=\(session.category.rawValue) mode=\(session.mode.rawValue)"
-    )
-
-    NotificationCenter.default.post(
-      name: AVAudioSession.interruptionNotification,
-      object: session,
-      userInfo: [
-        AVAudioSessionInterruptionTypeKey: AVAudioSession.InterruptionType.began.rawValue,
-      ]
-    )
-    NSLog("[ISMCall] Posted synthetic interruption .began")
-
-    DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
-      let mode: AVAudioSession.Mode = hasVideo ? .videoChat : .voiceChat
-      var options: AVAudioSession.CategoryOptions = [
-        .allowBluetooth,
-        .allowBluetoothA2DP,
-        .allowAirPlay,
-      ]
-      if hasVideo {
-        options.insert(.defaultToSpeaker)
-      }
-
-      // Must use `RTCAudioSession` + `lockForConfiguration` — raw `AVAudioSession` changes fail with
-      // "Session activation failed" while WebRTC/LiveKit own the session (kRTCAudioSessionErrorLockRequired).
-      let rtcSession = RTCAudioSession.sharedInstance()
-      rtcSession.lockForConfiguration()
-      defer { rtcSession.unlockForConfiguration() }
-      do {
-        try rtcSession.setCategory(.playAndRecord, mode: mode, options: options)
-        NSLog("[ISMCall] RTCAudioSession setCategory ok mode=\(mode.rawValue)")
-        do {
-          try rtcSession.setActive(true)
-          NSLog("[ISMCall] RTCAudioSession setActive ok")
-        } catch {
-          NSLog("[ISMCall] RTCAudioSession setActive (non-fatal): \(error.localizedDescription)")
-        }
-      } catch {
-        NSLog("[ISMCall] RTCAudioSession setCategory failed: \(error.localizedDescription)")
-      }
-
-      var endedInfo: [AnyHashable: Any] = [
-        AVAudioSessionInterruptionTypeKey: AVAudioSession.InterruptionType.ended.rawValue,
-      ]
-      endedInfo[AVAudioSessionInterruptionOptionKey] = AVAudioSession.InterruptionOptions.shouldResume.rawValue
-
-      NotificationCenter.default.post(
-        name: AVAudioSession.interruptionNotification,
-        object: session,
-        userInfo: endedInfo
-      )
-      NSLog("[ISMCall] Posted synthetic interruption .ended shouldResume — category=\(session.category.rawValue)")
-
-      rtcSession.audioSessionDidActivate(session)
-      rtcSession.isAudioEnabled = true
-      NSLog("[ISMCall] RTCAudioSession re-synced after synthetic interruption")
-    }
-  }
 }
 
 extension IsometrikFlutterCallPlugin: PKPushRegistryDelegate {
@@ -1055,12 +1077,14 @@ extension IsometrikFlutterCallPlugin: PKPushRegistryDelegate {
 
 extension IsometrikFlutterCallPlugin: CXProviderDelegate {
   public func providerDidReset(_ provider: CXProvider) {
+    IsometrikVoipAudioCoordinator.shared.endCall()
     nativeCallKitReported = false
     callIdByUUID.removeAll()
     activeCallUUID = nil
     activeCallId = nil
     outgoingCallUUID = nil
     activeCallHasVideo = false
+    lastCallKitIncomingDisplayName = nil
     sendEvent(type: "providerReset", payload: [:])
   }
 
@@ -1068,14 +1092,27 @@ extension IsometrikFlutterCallPlugin: CXProviderDelegate {
     let answeredCallId = callIdForAction(uuid: action.callUUID)
     activeCallUUID = action.callUUID
     activeCallId = answeredCallId
-    sendEvent(type: "callAnswered", payload: ["callId": answeredCallId as Any])
+    sendEvent(type: "callAnswered", payload: [
+      "callId": answeredCallId as Any,
+      "hasVideo": activeCallHasVideo,
+      "callerName": lastCallKitIncomingDisplayName as Any,
+    ])
     action.fulfill()
+    IsometrikVoipAudioCoordinator.shared.refresh(
+      hasVideo: activeCallHasVideo,
+      preferSpeaker: activeCallHasVideo,
+      hardReset: false
+    )
   }
 
   public func provider(_ provider: CXProvider, perform action: CXEndCallAction) {
+    IsometrikVoipAudioCoordinator.shared.endCall()
     let endedCallId = callIdForAction(uuid: action.callUUID)
     sendEvent(type: "callEnded", payload: ["callId": endedCallId as Any])
     callIdByUUID[action.callUUID] = nil
+    if callIdByUUID.isEmpty {
+      lastCallKitIncomingDisplayName = nil
+    }
     if activeCallUUID == action.callUUID {
       activeCallUUID = nil
       activeCallId = nil
@@ -1108,9 +1145,11 @@ extension IsometrikFlutterCallPlugin: CXProviderDelegate {
     let rtc = RTCAudioSession.sharedInstance()
     rtc.audioSessionDidActivate(audioSession)
     rtc.isAudioEnabled = true
-    // Do not run `reactivateAudioSessionForWebRTC()` here: posting `.began` stops WebRTC’s audio
-    // unit before LiveKit has opened the mic (background answer), which can leave capture dead.
-    // Reactivation runs from Dart after `Room.connect` + local track setup (see `reactivateIosCallAudioSession`).
+    // Native watchdog + stable RTC configure — does not depend on Flutter `Future.delayed`.
+    IsometrikVoipAudioCoordinator.shared.beginCall(
+      hasVideo: activeCallHasVideo,
+      preferSpeaker: activeCallHasVideo
+    )
     sendEvent(type: "callAudioSessionActivated", payload: [
       "reason": "callKit",
     ])
