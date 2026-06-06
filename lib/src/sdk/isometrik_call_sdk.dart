@@ -208,6 +208,74 @@ class IsometrikCallSdk {
   IsometrikCallConfiguration? get configuration => session.configuration;
   bool get blurIncomingUi => session.configuration?.blurIncomingUi ?? false;
 
+  /// True when iOS should invoke CallKit/PushKit native call UI.
+  ///
+  /// Always `false` on Android. When [IsometrikCallConfiguration.usePushKit] is
+  /// `false` on iOS, REST/MQTT and in-app [IsometrikCallPage] still work; no
+  /// CallKit methods are invoked from Dart.
+  bool get usesNativeCallKit =>
+      defaultTargetPlatform == TargetPlatform.iOS &&
+      (session.configuration?.usePushKit ?? false);
+
+  /// Whether Dart should invoke native call-session bridge methods.
+  ///
+  /// `false` only on iOS when [IsometrikCallConfiguration.usePushKit] is
+  /// `false`. Android always uses the native notification/ConnectionService bridge.
+  bool get invokesNativeCallBridge =>
+      defaultTargetPlatform != TargetPlatform.iOS || usesNativeCallKit;
+
+  bool get _skipIosCallKit =>
+      defaultTargetPlatform == TargetPlatform.iOS && !usesNativeCallKit;
+
+  Future<bool> _canMakeOutgoingNativeCall() async {
+    if (_skipIosCallKit) return true;
+    return native.canMakeOutgoingCall();
+  }
+
+  Future<void> _startOutgoingNativeCallIfEnabled({
+    required IsometrikCallDisplayUser callee,
+    required String callId,
+    required bool hasVideo,
+    required Map<String, dynamic> metadata,
+  }) async {
+    if (_skipIosCallKit) return;
+    await _startOutgoingCallSkippingSimulatorFailures(
+      native,
+      callee: callee,
+      callId: callId,
+      hasVideo: hasVideo,
+      metadata: metadata,
+    );
+  }
+
+  Future<void> _scheduleNativeHangupIfEnabled(double seconds) async {
+    if (_skipIosCallKit) return;
+    await native.scheduleHangup(seconds: seconds);
+  }
+
+  Future<void> _cancelNativeHangupIfEnabled() async {
+    if (_skipIosCallKit) return;
+    await native.cancelScheduledHangup();
+  }
+
+  Future<void> _reportOutgoingConnectedNativeIfEnabled() async {
+    if (_skipIosCallKit) return;
+    await native.reportOutgoingCallConnected();
+  }
+
+  Future<void> _endNativeCallKitSessionIfEnabled() async {
+    if (_skipIosCallKit) return;
+    await native.cancelScheduledHangup();
+    await native.endCurrentCall();
+  }
+
+  bool _isIosCallKitLifecycleEvent(String type) {
+    return type == 'incomingVoipPush' ||
+        type == 'providerReset' ||
+        type == 'callAnswered' ||
+        type == 'callEnded';
+  }
+
   void _markLocalOutgoingMeeting(String meetingId) {
     _lastLocalOutgoingMeetingId = meetingId;
     _lastLocalOutgoingAt = DateTime.now();
@@ -520,6 +588,7 @@ class IsometrikCallSdk {
     _nativeSub?.cancel();
     _nativeSub = native.events.listen((IsometrikNativeCallEvent e) async {
       if (e.type == 'voipTokenUpdated') {
+        if (_skipIosCallKit) return;
         final token = e.payload['token'] as String?;
         if (token == null) {
           return;
@@ -538,6 +607,7 @@ class IsometrikCallSdk {
           }
         }
       } else if (e.type == 'voipTokenInvalidated') {
+        if (_skipIosCallKit) return;
         final last =
             pushKitTokenStore.lastSyncedToken ??
             pushKitTokenStore.newToken ??
@@ -569,7 +639,8 @@ class IsometrikCallSdk {
       () => native.updateUserSession(userId: userId, userToken: userToken),
       debugLabel: 'updateUserSession',
     );
-    if (pushKitTokenStore.needToUpdate() &&
+    if (!_skipIosCallKit &&
+        pushKitTokenStore.needToUpdate() &&
         pushKitTokenStore.newToken != null) {
       final r = await meetings.updatePushRegistryApnsToken(
         addApnsDeviceToken: true,
@@ -606,12 +677,19 @@ class IsometrikCallSdk {
     meetingRouter.unbind();
   }
 
-  /// Register for VoIP pushes (iOS PushKit). No-op on unsupported platforms.
-  Future<void> registerForVoipPushes() =>
-      _invokeNativeBridgeIgnoringMissingPlugin(
-        native.registerForVoipPushes,
-        debugLabel: 'registerForVoipPushes',
+  /// Register for VoIP pushes (iOS PushKit). Skipped when [usesNativeCallKit] is false.
+  Future<void> registerForVoipPushes() async {
+    if (_skipIosCallKit) {
+      debugPrint(
+        'IsometrikCallSdk: registerForVoipPushes skipped (usePushKit=false)',
       );
+      return;
+    }
+    await _invokeNativeBridgeIgnoringMissingPlugin(
+      native.registerForVoipPushes,
+      debugLabel: 'registerForVoipPushes',
+    );
+  }
 
   /// Login — mirrors Example `ISMAuthViewModel.loginWith` + `/streaming/v2/user/authenticate`.
   Future<IsometrikResult<IsometrikAuthSession>> login({
@@ -628,7 +706,8 @@ class IsometrikCallSdk {
     }
   }
 
-  /// Full outgoing flow: `createMeeting` → CallKit outgoing → schedule no-answer hangup.
+  /// Full outgoing flow: `createMeeting` → optional CallKit outgoing → schedule no-answer hangup.
+  /// CallKit is skipped when [usesNativeCallKit] is false ([IsometrikCallConfiguration.usePushKit]).
   /// Mirrors Swift `ISMCallManager.createCall(callUser:conversationId:callType:)`.
   Future<IsometrikResult<IsometrikMeeting>> createOutgoingCall({
     required String memberId,
@@ -651,7 +730,7 @@ class IsometrikCallSdk {
         ),
       );
     }
-    final allowed = await native.canMakeOutgoingCall();
+    final allowed = await _canMakeOutgoingNativeCall();
     if (!allowed) {
       return const IsometrikFailure(
         IsometrikServerMessageError('Already on another call.'),
@@ -679,8 +758,7 @@ class IsometrikCallSdk {
         meetingRouterContext.callDetailsMeetingId = mid;
         meetingRouterContext.outgoingCallPending = true;
         meetingRouterContext.nativeCallActive = true;
-        await _startOutgoingCallSkippingSimulatorFailures(
-          native,
+        await _startOutgoingNativeCallIfEnabled(
           callee: displayUser,
           callId: mid,
           hasVideo: callType == IsometrikLiveCallType.videoCall,
@@ -689,9 +767,7 @@ class IsometrikCallSdk {
         // Swift `reportOutgoingCall` success: `callAnsweredByDeviceId = ISMDeviceId` so
         // multi-device MQTT (`joinRequestAccept` / `publishingStarted`) routes correctly.
         meetingRouterContext.callAnsweredByDeviceId = deviceId;
-        await native.scheduleHangup(
-          seconds: cfg.callHangupTimeOnNoAnswerSeconds,
-        );
+        await _scheduleNativeHangupIfEnabled(cfg.callHangupTimeOnNoAnswerSeconds);
         return IsometrikSuccess(data);
     }
   }
@@ -718,7 +794,7 @@ class IsometrikCallSdk {
         ),
       );
     }
-    final allowed = await native.canMakeOutgoingCall();
+    final allowed = await _canMakeOutgoingNativeCall();
     if (!allowed) {
       return const IsometrikFailure(
         IsometrikServerMessageError('Already on another call.'),
@@ -752,8 +828,7 @@ class IsometrikCallSdk {
             ? data.members!.first
             : null;
         final displayName = firstMember?.memberName ?? 'Call';
-        await _startOutgoingCallSkippingSimulatorFailures(
-          native,
+        await _startOutgoingNativeCallIfEnabled(
           callee: IsometrikCallDisplayUser(
             userId: firstMember?.memberId ?? mid,
             userName: displayName,
@@ -763,9 +838,7 @@ class IsometrikCallSdk {
           metadata: <String, dynamic>{'rtcToken': rtc, 'meetingId': mid},
         );
         meetingRouterContext.callAnsweredByDeviceId = deviceId;
-        await native.scheduleHangup(
-          seconds: cfg.callHangupTimeOnNoAnswerSeconds,
-        );
+        await _scheduleNativeHangupIfEnabled(cfg.callHangupTimeOnNoAnswerSeconds);
         return IsometrikSuccess(data);
     }
   }
@@ -787,7 +860,7 @@ class IsometrikCallSdk {
         ),
       );
     }
-    final allowed = await native.canMakeOutgoingCall();
+    final allowed = await _canMakeOutgoingNativeCall();
     if (!allowed) {
       return const IsometrikFailure(
         IsometrikServerMessageError('Already on another call.'),
@@ -812,8 +885,7 @@ class IsometrikCallSdk {
         );
         final hasVideo =
             _resolveCallType(primary: data) != IsometrikLiveCallType.audioCall;
-        await _startOutgoingCallSkippingSimulatorFailures(
-          native,
+        await _startOutgoingNativeCallIfEnabled(
           callee: IsometrikCallDisplayUser(
             userId: data.initiatorIdentifier ?? mid,
             userName: displayName,
@@ -823,9 +895,7 @@ class IsometrikCallSdk {
           metadata: <String, dynamic>{'rtcToken': rtc, 'meetingId': mid},
         );
         meetingRouterContext.callAnsweredByDeviceId = deviceId;
-        await native.scheduleHangup(
-          seconds: cfg.callHangupTimeOnNoAnswerSeconds,
-        );
+        await _scheduleNativeHangupIfEnabled(cfg.callHangupTimeOnNoAnswerSeconds);
         meetingRouterContext.callDetailsMeetingId = mid;
         meetingRouterContext.outgoingCallPending = true;
         meetingRouterContext.nativeCallActive = true;
@@ -949,11 +1019,14 @@ class IsometrikCallSdk {
     );
   }
 
-  /// Report CallKit incoming UI from decoded PushKit / MQTT payload — mirrors `reportIncomingCall(callDetails:)`.
+  /// Report incoming call from decoded PushKit / MQTT payload — mirrors `reportIncomingCall(callDetails:)`.
   ///
   /// When [skipNativeCallKitReport] is true (iOS PushKit already reported to CallKit),
   /// skips [native.reportIncomingCall] but still runs hangup scheduling and MQTT
   /// `callRinging` publish so behavior matches the Dart-initiated path.
+  ///
+  /// When [usesNativeCallKit] is false, no CallKit methods run; state tracking and MQTT
+  /// `callRinging` publish still apply so the host app can show [IsometrikCallPage].
   Future<void> reportIncomingCallFromMeeting(
     IsometrikMeeting meeting, {
     bool skipNativeCallKitReport = false,
@@ -1062,7 +1135,7 @@ class IsometrikCallSdk {
     meetingRouterContext.nativeCallActive = true;
     meetingRouterContext.callAnsweredByDeviceId = null;
     try {
-      if (!skipNativeCallKitReport) {
+      if (!_skipIosCallKit && !skipNativeCallKitReport) {
         await native.reportIncomingCall(
           callerName: _resolveIncomingCallerName(meeting: meeting),
           callId: mid,
@@ -1075,9 +1148,7 @@ class IsometrikCallSdk {
       }
       final cfg = session.configuration;
       if (cfg != null) {
-        await native.scheduleHangup(
-          seconds: cfg.callHangupTimeOnNoAnswerSeconds,
-        );
+        await _scheduleNativeHangupIfEnabled(cfg.callHangupTimeOnNoAnswerSeconds);
       }
       // Swift: after incoming CallKit succeeds, `publishMessage(.callRingingMessage)`.
       final did = session.deviceId;
@@ -1120,14 +1191,13 @@ class IsometrikCallSdk {
   /// Mark outgoing as connected — mirrors `startTheCall()`.
   Future<void> markOutgoingConnected() async {
     meetingRouterContext.outgoingCallPending = false;
-    await native.reportOutgoingCallConnected();
+    await _reportOutgoingConnectedNativeIfEnabled();
   }
 
   /// End native call + cancel hangup — mirrors `endCall` / disconnect.
   Future<void> endNativeCall() async {
     final currentMid = meetingRouterContext.callDetailsMeetingId;
-    await native.cancelScheduledHangup();
-    await native.endCurrentCall();
+    await _endNativeCallKitSessionIfEnabled();
     _resetRuntimeCallState(meetingId: currentMid);
   }
 
@@ -1216,19 +1286,23 @@ class IsometrikCallSdk {
       );
     }
     pushKitTokenStore.clear();
+    final shouldUnregisterVoip = usesNativeCallKit;
     session.clearSession();
-    await _invokeNativeBridgeIgnoringMissingPlugin(
-      native.unregisterVoipToken,
-      debugLabel: 'unregisterVoipToken',
-    );
+    if (shouldUnregisterVoip) {
+      await _invokeNativeBridgeIgnoringMissingPlugin(
+        native.unregisterVoipToken,
+        debugLabel: 'unregisterVoipToken',
+      );
+    }
   }
 
   // ---------------------------------------------------------------------------
   // Auto call handling — "batteries-included" mode
   // ---------------------------------------------------------------------------
 
-  /// Enable automatic call handling: global MQTT → CallKit side effects,
-  /// incoming call detection (PushKit + MQTT fallback), and auto-navigation.
+  /// Enable automatic call handling: global MQTT → optional CallKit side effects,
+  /// incoming call detection (PushKit when [usesNativeCallKit], else MQTT-only state),
+  /// and auto-navigation.
   ///
   /// Mirrors Swift `ISMCallManager` + `MQTT+ISMCall.swift` global routing
   /// that the example app previously wired up manually.
@@ -1347,9 +1421,7 @@ class IsometrikCallSdk {
         final mid = meeting.meetingId?.trim();
         if (mid == null || mid.isEmpty) return;
 
-        final usePushForIncoming =
-            defaultTargetPlatform == TargetPlatform.iOS &&
-            (session.configuration?.usePushKit ?? false);
+        final usePushForIncoming = usesNativeCallKit;
         if (usePushForIncoming) {
           // PushKit/FCM is the only trigger for incoming UI.
           // MQTT can only refresh pending details for the already-shown call.
@@ -1363,8 +1435,8 @@ class IsometrikCallSdk {
           return;
         }
 
-        // Non-Push mode: MQTT is the incoming-call UI trigger (documented).
-        // If UI is already shown (e.g. app manually reported), only refresh
+        // Non-Push mode: MQTT is the incoming-call trigger (no CallKit when
+        // [usesNativeCallKit] is false). If UI is already shown, only refresh
         // pending details for the same call id.
         if (_isIncomingCallShown) {
           if (_incomingCallId == mid) {
@@ -1393,6 +1465,12 @@ class IsometrikCallSdk {
   }
 
   Future<void> _handleAutoNativeEvent(IsometrikNativeCallEvent e) async {
+    if (_skipIosCallKit && _isIosCallKitLifecycleEvent(e.type)) {
+      debugPrint(
+        'IsometrikCallSdk: ${e.type} ignored (usePushKit=false)',
+      );
+      return;
+    }
     if (e.type == 'incomingVoipPush') {
       final meeting = _meetingFromIncomingVoipNativeEvent(e);
       if (meeting == null) {
@@ -1414,9 +1492,7 @@ class IsometrikCallSdk {
         skipNativeCallKitReport: skipNativeCallKit,
       );
     } else if (e.type == 'providerReset') {
-      try {
-        await native.cancelScheduledHangup();
-      } catch (_) {}
+      await _cancelNativeHangupIfEnabled();
       // CallKit provider reset can happen without a usable call id payload.
       // Clear all runtime incoming ids to avoid stale dedupe/resource state.
       _resetRuntimeCallState(clearAllReportedIncomingIds: true);
@@ -1478,7 +1554,7 @@ class IsometrikCallSdk {
       if (deviceId != null) {
         meetingRouterContext.callAnsweredByDeviceId = deviceId;
       }
-      await native.cancelScheduledHangup();
+      await _cancelNativeHangupIfEnabled();
 
       final r = await acceptCall(meetingId: meetingId);
       switch (r) {
