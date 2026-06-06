@@ -24,6 +24,9 @@ class IsometrikCallConfiguration {
   final String licenseKey;
   final String appSecret;
   final String userSecret;
+  /// When `true` (default on iOS), incoming VoIP uses PushKit and system CallKit UI.
+  /// When `false`, the SDK skips all CallKit/PushKit native calls (including MQTT-triggered
+  /// incoming); use [IsometrikCallPage] from the host app for in-app call UI.
   final bool usePushKit;
 
   /// REST base (Swift hard-coded `https://apis.isometrik.io`).

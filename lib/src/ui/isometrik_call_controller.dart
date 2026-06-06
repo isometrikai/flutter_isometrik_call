@@ -449,9 +449,11 @@ class IsometrikCallController extends ChangeNotifier {
     });
 
     // Cancel the no-answer hangup timer (mirrors Swift startTheCall).
-    try {
-      await sdk.native.cancelScheduledHangup();
-    } catch (_) {}
+    if (sdk.invokesNativeCallBridge) {
+      try {
+        await sdk.native.cancelScheduledHangup();
+      } catch (_) {}
+    }
 
     final token = rtcToken;
     final url = sdk.configuration?.streamingUrl;
@@ -947,7 +949,9 @@ class IsometrikCallController extends ChangeNotifier {
   /// Keeps OS call mute UI (CallKit / notification actions) aligned with [isMuted]
   /// shown on [IsometrikCallPage]. Speaker route sync lives in [_applySpeakerRoute].
   Future<void> _syncNativeCallUiIndicators() async {
-    if (_status == IsometrikCallStatus.ended) return;
+    if (_status == IsometrikCallStatus.ended || !sdk.invokesNativeCallBridge) {
+      return;
+    }
     _nativeMuteSyncDepth++;
     try {
       await sdk.native.setMute(_muted);
